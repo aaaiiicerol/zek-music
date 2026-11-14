@@ -1,0 +1,43 @@
+name: Gerar AppImage
+
+# Roda sozinho quando você cria uma tag de versão (ex.: v0.3.0)
+# ou manualmente pelo botão "Run workflow" na aba Actions.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Ubuntu 22.04 = glibc mais antigo, então o AppImage roda em mais distros
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar dependências
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config curl libfuse2 \
+            libasound2-dev libdbus-1-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compilar e gerar o AppImage
+        run: bash ./build-appimage.sh
+
+      - name: Guardar o arquivo na execução (Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZekMusic-AppImage
+          path: ZekMusic-x86_64.AppImage
+
+      - name: Publicar em Releases
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ZekMusic-x86_64.AppImage
+          generate_release_notes: true

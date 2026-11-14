@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Zek Music
+Comment=Player de músicas leve
+Exec=zek-music
+Icon=zek-music
+Categories=Audio;AudioVideo;Player;
+Terminal=false
+StartupWMClass=zek-music

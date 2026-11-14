@@ -1,0 +1,6 @@
+/target
+/AppDir
+/appimagetool
+*.AppImage
+*.zip
+.DS_Store
