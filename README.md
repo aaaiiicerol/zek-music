@@ -115,7 +115,7 @@ As configurações (pastas, nomes e ordem das playlists, volume) ficam em `~/.co
 
 ## 📄 Licença
 
-Defina a licença do projeto (por exemplo, MIT) adicionando um arquivo `LICENSE`.
+Distribuído sob a licença MIT. Veja o arquivo [LICENSE](LICENSE).
 
 ---
 
