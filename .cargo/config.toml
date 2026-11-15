@@ -1,0 +1,4 @@
+# Windows: embute o runtime do Visual C++ dentro do .exe,
+# assim o programa abre mesmo sem o "Visual C++ Redistributable" instalado.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

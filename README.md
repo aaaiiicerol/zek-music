@@ -7,7 +7,7 @@
 ![Rust](https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-AppImage-3b82f6?style=flat&logo=linux&logoColor=white)
 ![Windows](https://img.shields.io/badge/Windows-Instalador%20%2B%20Port%C3%A1til-0078d4?style=flat&logo=windows&logoColor=white)
-![Status](https://img.shields.io/badge/vers%C3%A3o-0.4.0-38bdf8?style=flat)
+![Status](https://img.shields.io/badge/vers%C3%A3o-0.4.1-38bdf8?style=flat)
 
 <img src="screenshots/zek-music.png" alt="Zek Music" width="900">
 
