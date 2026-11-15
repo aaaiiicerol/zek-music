@@ -76,7 +76,7 @@ sudo apt install build-essential pkg-config libasound2-dev libdbus-1-dev curl
 Instale o [Rust](https://rustup.rs) e rode:
 
 ```bash
-git clone https://github.com/ezekielso/zek-music.git
+git clone https://github.com/aaaiiicerol/zek-music.git
 cd zek-music
 
 cargo run --release        # compila e abre
@@ -120,5 +120,5 @@ Distribuído sob a licença MIT. Veja o arquivo [LICENSE](LICENSE).
 ---
 
 <div align="center">
-Feito com 💙 por <a href="https://github.com/ezekielso">ezekielso</a>
+Feito com 💙 por <a href="https://github.com/aaaiiicerol">aaaiiicerol</a>
 </div>
