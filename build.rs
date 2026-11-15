@@ -8,7 +8,7 @@ fn main() {
         res.set_icon("packaging/zek-music.ico");
         res.set("ProductName", "Zek Music");
         res.set("FileDescription", "Zek Music - player de músicas");
-        res.set("CompanyName", "ezekielso");
+        res.set("CompanyName", "aaaiiicerol");
         res.set("LegalCopyright", "MIT License");
         if let Err(e) = res.compile() {
             eprintln!("aviso: não foi possível embutir o ícone: {e}");

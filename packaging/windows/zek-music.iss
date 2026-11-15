@@ -11,10 +11,10 @@
 AppId={{8800198B-678A-408B-9B7A-E196F6E5FECA}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-AppPublisher=ezekielso
-AppPublisherURL=https://github.com/ezekielso/zek-music
-AppSupportURL=https://github.com/ezekielso/zek-music/issues
-AppUpdatesURL=https://github.com/ezekielso/zek-music/releases
+AppPublisher=aaaiiicerol
+AppPublisherURL=https://github.com/aaaiiicerol/zek-music
+AppSupportURL=https://github.com/aaaiiicerol/zek-music/issues
+AppUpdatesURL=https://github.com/aaaiiicerol/zek-music/releases
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
