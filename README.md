@@ -6,7 +6,7 @@
 
 ![Rust](https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-AppImage-3b82f6?style=flat&logo=linux&logoColor=white)
-![Status](https://img.shields.io/badge/vers%C3%A3o-0.3.0-38bdf8?style=flat)
+![Status](https://img.shields.io/badge/vers%C3%A3o-0.3.2-38bdf8?style=flat)
 
 <img src="screenshots/zek-music.png" alt="Zek Music" width="900">
 

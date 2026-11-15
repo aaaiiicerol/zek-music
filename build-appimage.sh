@@ -9,7 +9,11 @@ rm -rf AppDir
 mkdir -p AppDir/usr/bin
 cp target/release/zek-music AppDir/usr/bin/
 cp packaging/zek-music.desktop AppDir/
-cp packaging/zek-music.svg AppDir/
+cp packaging/zek-music.png AppDir/zek-music.png
+cp packaging/zek-music.png AppDir/.DirIcon
+mkdir -p AppDir/usr/share/icons/hicolor/scalable/apps AppDir/usr/share/icons/hicolor/512x512/apps
+cp packaging/zek-music.svg AppDir/usr/share/icons/hicolor/scalable/apps/zek-music.svg
+cp packaging/zek-music.png AppDir/usr/share/icons/hicolor/512x512/apps/zek-music.png
 
 cat > AppDir/AppRun << 'RUN'
 #!/bin/sh

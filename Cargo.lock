@@ -4621,7 +4621,7 @@ dependencies = [
 
 [[package]]
 name = "zek-music"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "dirs",
  "eframe",
@@ -4634,6 +4634,7 @@ dependencies = [
  "serde",
  "serde_json",
  "souvlaki",
+ "symphonia",
 ]
 
 [[package]]

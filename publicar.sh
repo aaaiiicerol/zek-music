@@ -5,7 +5,7 @@ set -e
 cd "$(dirname "$0")"
 
 REPO="zek-music"
-VERSAO="v0.3.0"
+VERSAO="v0.3.2"
 DESC="Player de músicas leve para Linux onde cada pasta vira uma playlist. Feito em Rust."
 
 echo "=== Publicando o Zek Music no GitHub ==="

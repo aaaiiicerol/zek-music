@@ -1,6 +1,26 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-    <stop offset="0" stop-color="#3884ff"/><stop offset="1" stop-color="#0b1a46"/></linearGradient></defs>
-  <rect width="256" height="256" rx="56" fill="url(#g)"/>
-  <path d="M104 74 L104 182 L190 128 Z" fill="#fff"/>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#0a1740"/>
+    </linearGradient>
+    <linearGradient id="z" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#cfe8ff"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="58" fill="url(#bg)"/>
+  <g stroke="#ffffff" stroke-opacity="0.09" stroke-width="3" stroke-linecap="round">
+    <line x1="26" y1="72" x2="230" y2="72"/>
+    <line x1="26" y1="100" x2="230" y2="100"/>
+    <line x1="26" y1="128" x2="230" y2="128"/>
+    <line x1="26" y1="156" x2="230" y2="156"/>
+    <line x1="26" y1="184" x2="230" y2="184"/>
+  </g>
+  <path d="M66 74 H168 L82 176 H142" fill="none" stroke="url(#z)" stroke-width="26"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <ellipse cx="166" cy="178" rx="24" ry="17" transform="rotate(-22 166 178)" fill="#22d3ee"/>
+  <path d="M186 172 V108" fill="none" stroke="#22d3ee" stroke-width="12" stroke-linecap="round"/>
+  <path d="M186 108 C186 132 222 134 214 168" fill="none" stroke="#22d3ee" stroke-width="12"
+        stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

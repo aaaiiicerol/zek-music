@@ -10,6 +10,14 @@ use lofty::tag::Accessor;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rand::Rng;
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::{Decoder as SymDecoder, DecoderOptions};
+use symphonia::core::errors::Error as SymError;
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
+use symphonia::core::units::Time;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -365,23 +373,176 @@ fn mp3_clean_starts(d: &[u8], max: usize) -> Vec<usize> {
     out
 }
 
+/// Primeiro quadro MPEG válido (confirmado por mais dois quadros seguidos).
+fn mp3_first_frame(d: &[u8]) -> Option<usize> {
+    let limit = d.len().min(1 << 20);
+    for i in 0..limit {
+        if let Some((l1, _)) = mp3_frame_at(d, i) {
+            if l1 > 4 {
+                if let Some((l2, _)) = mp3_frame_at(d, i + l1) {
+                    if l2 > 4 && mp3_frame_at(d, i + l1 + l2).is_some() {
+                        return Some(i);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Coloca 3 quadros de silêncio antes do áudio. Alguns MP3 começam num quadro que
+/// depende de dados anteriores (que não existem); os quadros de silêncio preenchem
+/// esse "reservatório" e o decodificador consegue começar.
+fn mp3_with_silent_prefix(d: &[u8]) -> Option<Vec<u8>> {
+    let i = mp3_first_frame(d)?;
+    let (len, _) = mp3_frame_at(d, i)?;
+    let pad = ((d[i + 2] >> 1) & 1) as usize;
+    let base = len.checked_sub(pad)?;
+    if base < 24 {
+        return None;
+    }
+    // mesmo cabeçalho, sem CRC e sem padding
+    let header = [d[i], d[i + 1] | 1, d[i + 2] & !0x02, d[i + 3]];
+    let mut out = Vec::with_capacity(d.len() - i + base * 3);
+    for _ in 0..3 {
+        out.extend_from_slice(&header);
+        out.resize(out.len() + base - 4, 0);
+    }
+    out.extend_from_slice(&d[i..]);
+    Some(out)
+}
+
+/// Decodificador "tolerante": usa o symphonia direto e PULA os blocos com defeito
+/// em vez de encerrar a música (o rodio para no primeiro erro).
+struct TolerantSource {
+    format: Box<dyn FormatReader>,
+    decoder: Box<dyn SymDecoder>,
+    track_id: u32,
+    buf: Vec<i16>,
+    pos: usize,
+    channels: u16,
+    rate: u32,
+    dur: Option<Duration>,
+}
+
+impl TolerantSource {
+    fn new(data: Vec<u8>) -> Option<Self> {
+        let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(data)), Default::default());
+        let mut hint = Hint::new();
+        hint.with_extension("mp3");
+        let probed = symphonia::default::get_probe()
+            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+            .ok()?;
+        let format = probed.format;
+        let (track_id, params) = {
+            let t = format.default_track()?;
+            (t.id, t.codec_params.clone())
+        };
+        let decoder = symphonia::default::get_codecs().make(&params, &DecoderOptions::default()).ok()?;
+        let rate = params.sample_rate.unwrap_or(44100);
+        let channels = params.channels.map(|c| c.count() as u16).unwrap_or(2);
+        let dur = match (params.n_frames, params.sample_rate) {
+            (Some(n), Some(r)) if r > 0 => Some(Duration::from_secs_f64(n as f64 / r as f64)),
+            _ => None,
+        };
+        let mut s = Self { format, decoder, track_id, buf: vec![], pos: 0, channels, rate, dur };
+        if !s.refill() {
+            return None;
+        }
+        Some(s)
+    }
+
+    fn refill(&mut self) -> bool {
+        loop {
+            let packet = match self.format.next_packet() {
+                Ok(p) => p,
+                Err(_) => return false,
+            };
+            if packet.track_id() != self.track_id {
+                continue;
+            }
+            match self.decoder.decode(&packet) {
+                Ok(decoded) => {
+                    let spec = *decoded.spec();
+                    let mut sb = SampleBuffer::<i16>::new(decoded.capacity() as u64, spec);
+                    sb.copy_interleaved_ref(decoded);
+                    self.channels = spec.channels.count() as u16;
+                    self.rate = spec.rate;
+                    self.buf.clear();
+                    self.buf.extend_from_slice(sb.samples());
+                    self.pos = 0;
+                    if self.buf.is_empty() {
+                        continue;
+                    }
+                    return true;
+                }
+                // bloco com defeito: ignora e segue para o próximo
+                Err(SymError::DecodeError(_)) => continue,
+                Err(_) => return false,
+            }
+        }
+    }
+}
+
+impl Iterator for TolerantSource {
+    type Item = i16;
+    fn next(&mut self) -> Option<i16> {
+        if self.pos >= self.buf.len() && !self.refill() {
+            return None;
+        }
+        let v = self.buf[self.pos];
+        self.pos += 1;
+        Some(v)
+    }
+}
+
+impl Source for TolerantSource {
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+    fn channels(&self) -> u16 {
+        self.channels
+    }
+    fn sample_rate(&self) -> u32 {
+        self.rate
+    }
+    fn total_duration(&self) -> Option<Duration> {
+        self.dur
+    }
+    fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
+        match self.format.seek(
+            SeekMode::Coarse,
+            SeekTo::Time { time: Time::from(pos.as_secs_f64()), track_id: Some(self.track_id) },
+        ) {
+            Ok(_) => {
+                self.decoder.reset();
+                self.buf.clear();
+                self.pos = 0;
+                Ok(())
+            }
+            Err(_) => Err(rodio::source::SeekError::NotSupported { underlying_source: "TolerantSource" }),
+        }
+    }
+}
+
 fn make_source(path: &Path) -> Result<Box<dyn Source<Item = i16> + Send>, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     match Decoder::new(std::io::BufReader::new(file)) {
         Ok(d) => Ok(Box::new(d)),
         Err(first) => {
-            // Plano B: lê o arquivo, ignora etiquetas problemáticas e tenta de novo.
+            // Plano B: decodificador tolerante (pula blocos com defeito e continua tocando).
             let data = std::fs::read(path).map_err(|e| e.to_string())?;
             let cleaned = strip_tags(&data);
-            if let Ok(d) = Decoder::new(std::io::Cursor::new(cleaned.clone())) {
-                return Ok(Box::new(d));
+            if let Some(t) = TolerantSource::new(cleaned.clone()) {
+                return Ok(Box::new(t));
             }
-            // Plano C: MP3 "cortado" (o primeiro quadro depende de dados que não existem).
-            // Começa a decodificar num quadro limpo (main_data_begin == 0).
-            for s in mp3_clean_starts(&cleaned, 6) {
-                if let Ok(d) = Decoder::new(std::io::Cursor::new(cleaned[s..].to_vec())) {
-                    return Ok(Box::new(d));
+            if let Some(fixed) = mp3_with_silent_prefix(&cleaned) {
+                if let Some(t) = TolerantSource::new(fixed) {
+                    return Ok(Box::new(t));
                 }
+            }
+            if let Some(t) = TolerantSource::new(data) {
+                return Ok(Box::new(t));
             }
             Err(format!("{first}"))
         }
@@ -706,6 +867,7 @@ struct Engine {
     shuffle: bool,
     repeat: Repeat,
     volume: f32,
+    last_pos: f32,
     now: Option<Meta>,
     controls: Option<MediaControls>,
 }
@@ -725,6 +887,7 @@ impl Engine {
             shuffle: false,
             repeat: Repeat::Off,
             volume,
+            last_pos: 0.0,
             now: None,
             controls: make_controls(tx),
         }
@@ -744,7 +907,13 @@ impl Engine {
     fn tick(&mut self) {
         let ended = !self.paused && self.sink.as_ref().map_or(false, |s| s.empty());
         if ended {
+            let early = self.last_pos < 1.5 && self.now.as_ref().map_or(false, |n| n.duration > 5.0);
+            let nome = self.now.as_ref().map(|n| n.title.clone()).unwrap_or_default();
             self.advance(true);
+            if early {
+                self.set_status(format!("\"{}\" parou logo no começo (arquivo com defeito?). Pulei para a próxima.", nome));
+                self.publish_full();
+            }
         } else {
             self.publish_pos();
         }
@@ -804,9 +973,10 @@ impl Engine {
         self.ctx.request_repaint();
     }
 
-    fn publish_pos(&self) {
+    fn publish_pos(&mut self) {
         if let Some(s) = &self.sink {
             let pos = s.get_pos().as_secs_f32();
+            self.last_pos = pos;
             let mut g = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             g.pos = pos;
         }
@@ -888,6 +1058,7 @@ impl Engine {
         let (m, cover) = read_info(&path, src_dur, true);
         self.set_cover(cover);
         self.now = Some(m);
+        self.last_pos = 0.0;
         self.paused = false;
         self.set_status(String::new());
         self.publish_full();
@@ -2035,14 +2206,21 @@ fn setup_style(ctx: &egui::Context) {
     });
 }
 
+fn load_icon() -> Option<egui::IconData> {
+    let img = image::load_from_memory(include_bytes!("../packaging/zek-music.png")).ok()?;
+    let img = img.thumbnail(256, 256).to_rgba8();
+    Some(egui::IconData { width: img.width(), height: img.height(), rgba: img.into_raw() })
+}
+
 fn main() -> eframe::Result<()> {
-    let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1180.0, 740.0])
-            .with_min_inner_size([980.0, 580.0])
-            .with_title("Zek Music")
-            .with_app_id("zek-music"),
-        ..Default::default()
-    };
+    let mut vp = egui::ViewportBuilder::default()
+        .with_inner_size([1180.0, 740.0])
+        .with_min_inner_size([980.0, 580.0])
+        .with_title("Zek Music")
+        .with_app_id("zek-music");
+    if let Some(ic) = load_icon() {
+        vp = vp.with_icon(ic);
+    }
+    let opts = eframe::NativeOptions { viewport: vp, ..Default::default() };
     eframe::run_native("Zek Music", opts, Box::new(|cc| Ok(Box::new(ZekApp::new(cc)))))
 }
