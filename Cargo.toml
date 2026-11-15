@@ -1,11 +1,11 @@
 [package]
 name = "zek-music"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
-description = "Zek Music - player de músicas leve para Linux"
+description = "Zek Music - player de músicas leve para Linux e Windows"
 
 [dependencies]
-eframe = { version = "=0.29.1", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+eframe = { version = "=0.29.1", default-features = false, features = ["glow", "default_fonts"] }
 rodio = { version = "=0.19.0", default-features = false, features = ["symphonia-all"] }
 notify = "6"
 rfd = "0.15"
@@ -16,7 +16,19 @@ dirs = "5"
 rand = "0.8"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 symphonia = { version = "0.5", default-features = false, features = ["mp3"] }
+
+# ── Linux: janelas X11/Wayland e teclas de mídia (MPRIS)
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "=0.29.1", default-features = false, features = ["x11", "wayland"] }
 souvlaki = "0.7"
+
+# ── Windows: DirectX (wgpu) funciona até em máquinas virtuais sem placa de vídeo
+[target.'cfg(windows)'.dependencies]
+eframe = { version = "=0.29.1", default-features = false, features = ["wgpu"] }
+wgpu = { version = "22", default-features = false, features = ["wgsl", "dx12"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,25 @@
+ZEK MUSIC - VERSÃO PORTÁTIL (Windows)
+=====================================
+
+Como usar
+  1. Extraia esta pasta para onde quiser (Área de Trabalho, pen drive...).
+  2. Dê dois cliques em zek-music.exe.
+  3. Na primeira vez, escolha a pasta que CONTÉM as suas pastas de músicas.
+     Cada subpasta vira uma playlist.
+
+Onde ficam as configurações
+  Na pasta "dados", ao lado do programa (por causa do arquivo portable.txt).
+  Para mover o Zek Music para outro computador, leve a pasta inteira.
+  Se apagar o portable.txt, o programa passa a guardar tudo em
+  %APPDATA%\zek-music (modo normal).
+
+Para remover
+  Apague a pasta. Não fica nada instalado no Windows.
+
+Aviso do Windows (SmartScreen)
+  Como o programa ainda não tem assinatura digital paga, o Windows pode mostrar
+  "O Windows protegeu o computador" na primeira abertura.
+  Clique em "Mais informações" e depois em "Executar assim mesmo".
+  O código é aberto: https://github.com/ezekielso/zek-music
+
+Licença: MIT (arquivo LICENSE)

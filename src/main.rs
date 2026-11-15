@@ -1,6 +1,8 @@
 //! Zek Music — player de músicas leve para Linux.
 //! Pasta = playlist, monitoramento automático, playlists personalizadas.
 
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use eframe::egui::{
     self, Align, Align2, Color32, FontId, Frame, Layout, Margin, Pos2, Rect, RichText, Rounding,
     Sense, Stroke, Vec2,
@@ -24,6 +26,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "linux")]
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig};
 use std::time::{Duration, Instant};
 
@@ -95,6 +98,14 @@ struct Meta {
 }
 
 fn config_path() -> PathBuf {
+    // Modo portátil: se existir "portable.txt" ao lado do programa, tudo fica na pasta "dados".
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if dir.join("portable.txt").exists() {
+                return dir.join("dados").join("config.json");
+            }
+        }
+    }
     let mut p = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     p.push("zek-music");
     p.push("config.json");
@@ -832,6 +843,7 @@ struct Snap {
     status: String,
 }
 
+#[cfg(target_os = "linux")]
 fn make_controls(tx: Sender<Cmd>) -> Option<MediaControls> {
     let cfg = PlatformConfig { dbus_name: "zek_music", display_name: "Zek Music", hwnd: None };
     let mut c = MediaControls::new(cfg).ok()?;
@@ -869,10 +881,12 @@ struct Engine {
     volume: f32,
     last_pos: f32,
     now: Option<Meta>,
+    #[cfg(target_os = "linux")]
     controls: Option<MediaControls>,
 }
 
 impl Engine {
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     fn new(rx: Receiver<Cmd>, tx: Sender<Cmd>, shared: Arc<Mutex<Shared>>, ctx: egui::Context, volume: f32) -> Self {
         Self {
             rx,
@@ -889,6 +903,7 @@ impl Engine {
             volume,
             last_pos: 0.0,
             now: None,
+            #[cfg(target_os = "linux")]
             controls: make_controls(tx),
         }
     }
@@ -993,6 +1008,10 @@ impl Engine {
         g.cover_gen += 1;
     }
 
+    #[cfg(not(target_os = "linux"))]
+    fn mpris_update(&mut self, _meta_changed: bool) {}
+
+    #[cfg(target_os = "linux")]
     fn mpris_update(&mut self, meta_changed: bool) {
         let pos = self.sink.as_ref().map_or(0.0, |s| s.get_pos().as_secs_f32());
         let stopped = self.sink.is_none();
@@ -2212,7 +2231,7 @@ fn load_icon() -> Option<egui::IconData> {
     Some(egui::IconData { width: img.width(), height: img.height(), rgba: img.into_raw() })
 }
 
-fn main() -> eframe::Result<()> {
+fn build_viewport() -> egui::ViewportBuilder {
     let mut vp = egui::ViewportBuilder::default()
         .with_inner_size([1180.0, 740.0])
         .with_min_inner_size([980.0, 580.0])
@@ -2221,6 +2240,31 @@ fn main() -> eframe::Result<()> {
     if let Some(ic) = load_icon() {
         vp = vp.with_icon(ic);
     }
-    let opts = eframe::NativeOptions { viewport: vp, ..Default::default() };
+    vp
+}
+
+#[cfg(not(windows))]
+fn main() -> eframe::Result<()> {
+    let opts = eframe::NativeOptions { viewport: build_viewport(), ..Default::default() };
     eframe::run_native("Zek Music", opts, Box::new(|cc| Ok(Box::new(ZekApp::new(cc)))))
+}
+
+#[cfg(windows)]
+fn main() -> eframe::Result<()> {
+    // 1ª tentativa: DirectX (funciona até em máquinas virtuais, sem placa de vídeo)
+    let opts = eframe::NativeOptions { viewport: build_viewport(), renderer: eframe::Renderer::Wgpu, ..Default::default() };
+    if eframe::run_native("Zek Music", opts, Box::new(|cc| Ok(Box::new(ZekApp::new(cc))))).is_ok() {
+        return Ok(());
+    }
+    // 2ª tentativa: OpenGL
+    let opts = eframe::NativeOptions { viewport: build_viewport(), renderer: eframe::Renderer::Glow, ..Default::default() };
+    let r = eframe::run_native("Zek Music", opts, Box::new(|cc| Ok(Box::new(ZekApp::new(cc)))));
+    if let Err(e) = &r {
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("Zek Music")
+            .set_description(format!("Não foi possível abrir a janela do programa:\n\n{e}"))
+            .show();
+    }
+    r
 }
