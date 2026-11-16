@@ -272,12 +272,36 @@ fn read_info(path: &Path, fallback: Option<f32>, want_cover: bool) -> (Meta, Opt
     (m, cover)
 }
 
-fn make_texture(ctx: &egui::Context, bytes: &[u8]) -> Option<egui::TextureHandle> {
+/// Cor "vibrante" média da capa, usada no degradê da tela expandida.
+fn dominant_color(img: &image::RgbaImage) -> Color32 {
+    let (mut r, mut g, mut b, mut ws) = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
+    for p in img.pixels().step_by(41) {
+        let (pr, pg, pb) = (p[0] as f32, p[1] as f32, p[2] as f32);
+        let mx = pr.max(pg).max(pb);
+        let mn = pr.min(pg).min(pb);
+        let sat = (mx - mn) / 255.0;
+        let lum = (pr + pg + pb) / 765.0;
+        let w = (0.08 + sat) * (1.0 - (lum - 0.5).abs() * 1.4).max(0.05);
+        r += pr * w;
+        g += pg * w;
+        b += pb * w;
+        ws += w;
+    }
+    if ws <= 0.0 {
+        return Color32::from_rgb(40, 70, 140);
+    }
+    let (r, g, b) = (r / ws, g / ws, b / ws);
+    let k = 150.0 / r.max(g).max(b).max(1.0);
+    Color32::from_rgb((r * k).min(255.0) as u8, (g * k).min(255.0) as u8, (b * k).min(255.0) as u8)
+}
+
+fn make_texture(ctx: &egui::Context, bytes: &[u8]) -> Option<(egui::TextureHandle, Color32)> {
     let img = image::load_from_memory(bytes).ok()?;
     let img = img.thumbnail(320, 320).to_rgba8();
+    let color = dominant_color(&img);
     let size = [img.width() as usize, img.height() as usize];
     let ci = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
-    Some(ctx.load_texture("cover", ci, egui::TextureOptions::LINEAR))
+    Some((ctx.load_texture("cover", ci, egui::TextureOptions::LINEAR), color))
 }
 
 // ───────────────────────── Decodificação (com plano B) ─────────────────────────
@@ -561,6 +585,27 @@ fn make_source(path: &Path) -> Result<Box<dyn Source<Item = i16> + Send>, String
 }
 
 // ───────────────────────── Desenho (gradientes, ícones, barras) ─────────────────────────
+fn scale_color(c: Color32, k: f32) -> Color32 {
+    Color32::from_rgb((c.r() as f32 * k) as u8, (c.g() as f32 * k) as u8, (c.b() as f32 * k) as u8)
+}
+
+fn gradient_rect_4(p: &egui::Painter, rect: Rect, tl: Color32, tr: Color32, br: Color32, bl: Color32) {
+    let mut m = egui::Mesh::default();
+    m.colored_vertex(rect.left_top(), tl);
+    m.colored_vertex(rect.right_top(), tr);
+    m.colored_vertex(rect.right_bottom(), br);
+    m.colored_vertex(rect.left_bottom(), bl);
+    m.add_triangle(0, 1, 2);
+    m.add_triangle(0, 2, 3);
+    p.add(egui::Shape::mesh(m));
+}
+
+fn chevron(p: &egui::Painter, c: Pos2, up: bool, col: Color32) {
+    let d = if up { -1.0 } else { 1.0 };
+    let pts = vec![Pos2::new(c.x - 7.0, c.y - 3.0 * d), Pos2::new(c.x, c.y + 3.0 * d), Pos2::new(c.x + 7.0, c.y - 3.0 * d)];
+    p.add(egui::Shape::line(pts, stroke(2.2, col)));
+}
+
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
@@ -866,6 +911,17 @@ fn make_controls(tx: Sender<Cmd>) -> Option<MediaControls> {
     Some(c)
 }
 
+/// Nome do dispositivo de saída padrão (usado no Windows para perceber a troca de fone/caixa).
+#[cfg(windows)]
+fn default_output_name() -> Option<String> {
+    use rodio::cpal::traits::{DeviceTrait, HostTrait};
+    rodio::cpal::default_host().default_output_device().and_then(|d| d.name().ok())
+}
+#[cfg(not(windows))]
+fn default_output_name() -> Option<String> {
+    None
+}
+
 struct Engine {
     rx: Receiver<Cmd>,
     shared: Arc<Mutex<Shared>>,
@@ -880,6 +936,11 @@ struct Engine {
     repeat: Repeat,
     volume: f32,
     last_pos: f32,
+    device_name: Option<String>,
+    #[allow(dead_code)]
+    last_device_check: Instant,
+    stall_pos: f32,
+    stall_since: Option<Instant>,
     now: Option<Meta>,
     #[cfg(target_os = "linux")]
     controls: Option<MediaControls>,
@@ -902,6 +963,10 @@ impl Engine {
             repeat: Repeat::Off,
             volume,
             last_pos: 0.0,
+            device_name: default_output_name(),
+            last_device_check: Instant::now(),
+            stall_pos: -1.0,
+            stall_since: None,
             now: None,
             #[cfg(target_os = "linux")]
             controls: make_controls(tx),
@@ -919,7 +984,85 @@ impl Engine {
         }
     }
 
+    /// Reabre a saída de áudio e continua a música do mesmo ponto
+    /// (ao trocar de fone/caixa de som ou quando o dispositivo some).
+    fn reopen_output(&mut self) {
+        let pos = self.sink.as_ref().map_or(0.0, |s| s.get_pos().as_secs_f32());
+        let had_sink = self.sink.is_some();
+        let paused = self.paused;
+        if let Some(old) = self.sink.take() {
+            old.stop();
+        }
+        self.stream = None;
+        self.stream = OutputStream::try_default().ok();
+        self.stall_since = None;
+        self.stall_pos = -1.0;
+        if self.stream.is_none() {
+            self.set_status("Nenhuma saída de áudio encontrada. Conecte um dispositivo e toque de novo.".into());
+            self.publish_full();
+            self.mpris_update(false);
+            return;
+        }
+        if had_sink {
+            if let Some(path) = self.queue.get(self.qindex).cloned() {
+                if let (Ok(source), Some((_, handle))) = (make_source(&path), &self.stream) {
+                    if let Ok(sink) = Sink::try_new(handle) {
+                        sink.set_volume(self.volume);
+                        sink.append(source);
+                        if pos > 0.5 {
+                            let _ = sink.try_seek(Duration::from_secs_f32(pos));
+                        }
+                        if paused {
+                            sink.pause();
+                        }
+                        self.sink = Some(sink);
+                    }
+                }
+            }
+        }
+        self.set_status(String::new());
+        self.publish_full();
+        self.mpris_update(false);
+    }
+
+    fn check_output(&mut self) {
+        #[cfg(windows)]
+        {
+            if self.last_device_check.elapsed() >= Duration::from_millis(1500) {
+                self.last_device_check = Instant::now();
+                let nome = default_output_name();
+                if nome.is_some() && nome != self.device_name {
+                    self.device_name = nome;
+                    self.reopen_output();
+                    return;
+                }
+            }
+        }
+        // Tempo parado por mais de 3 s com a música "tocando" (ex.: fone desconectado)
+        let mut stalled = false;
+        if let Some(s) = &self.sink {
+            if !self.paused && !s.empty() {
+                let pos = s.get_pos().as_secs_f32();
+                if (pos - self.stall_pos).abs() < 0.001 {
+                    let t = *self.stall_since.get_or_insert_with(Instant::now);
+                    stalled = t.elapsed() > Duration::from_secs(3);
+                } else {
+                    self.stall_pos = pos;
+                    self.stall_since = None;
+                }
+            } else {
+                self.stall_since = None;
+            }
+        } else {
+            self.stall_since = None;
+        }
+        if stalled {
+            self.reopen_output();
+        }
+    }
+
     fn tick(&mut self) {
+        self.check_output();
         let ended = !self.paused && self.sink.as_ref().map_or(false, |s| s.empty());
         if ended {
             let early = self.last_pos < 1.5 && self.now.as_ref().map_or(false, |n| n.duration > 5.0);
@@ -1046,6 +1189,9 @@ impl Engine {
         }
         let path = self.queue[idx].clone();
         self.qindex = idx;
+        if self.stream.is_none() {
+            self.stream = OutputStream::try_default().ok();
+        }
         let Some((_, handle)) = &self.stream else {
             self.set_status("Nenhuma saída de áudio encontrada.".into());
             self.publish_full();
@@ -1223,7 +1369,10 @@ struct ZekApp {
     shared: Arc<Mutex<Shared>>,
     snap: Snap,
     cover: Option<egui::TextureHandle>,
+    cover_color: Option<Color32>,
     cover_gen: u64,
+    expanded: bool,
+    bar_top: f32,
     shuffle: bool,
     repeat: Repeat,
     muted: bool,
@@ -1265,7 +1414,10 @@ impl ZekApp {
             shared,
             snap: Snap::default(),
             cover: None,
+            cover_color: None,
             cover_gen: 0,
+            expanded: false,
+            bar_top: 0.0,
             shuffle: false,
             repeat: Repeat::Off,
             muted: false,
@@ -1458,7 +1610,22 @@ impl ZekApp {
             }
         }
         if let Some(c) = new_cover {
-            self.cover = c.and_then(|b| make_texture(&self.ctx, &b));
+            match c.and_then(|b| make_texture(&self.ctx, &b)) {
+                Some((tex, col)) => {
+                    self.cover = Some(tex);
+                    self.cover_color = Some(col);
+                }
+                None => {
+                    self.cover = None;
+                    self.cover_color = None;
+                }
+            }
+        }
+        if self.expanded && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.expanded = false;
+        }
+        if self.snap.now.is_none() {
+            self.expanded = false;
         }
         if !self.seeking {
             self.seek_val = self.snap.pos;
@@ -1653,7 +1820,7 @@ impl ZekApp {
 
     // ───────────────────────── UI: barra do player ─────────────────────────
     fn ui_player(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
-        egui::TopBottomPanel::bottom("player")
+        let bar_resp = egui::TopBottomPanel::bottom("player")
             .exact_height(98.0)
             .frame(Frame::none().fill(PANEL).inner_margin(Margin::symmetric(20.0, 12.0)))
             .show(ctx, |ui| {
@@ -1663,6 +1830,7 @@ impl ZekApp {
                 let mid_w = (total - left_w - right_w - 16.0).max(240.0);
                 ui.horizontal(|ui| {
                     // ── esquerda: capa + faixa atual
+                    let left_origin = ui.cursor().min;
                     ui.allocate_ui_with_layout(Vec2::new(left_w, 72.0), Layout::left_to_right(Align::Center), |ui| {
                         let (r, _) = ui.allocate_exact_size(Vec2::splat(64.0), Sense::hover());
                         if let Some(tex) = &self.cover {
@@ -1692,10 +1860,24 @@ impl ZekApp {
                             }
                         });
                     });
+                    {
+                        let hit_rect = Rect::from_min_size(left_origin, Vec2::new(left_w, 72.0));
+                        let hit = ui.interact(hit_rect, ui.id().with("np_toggle"), Sense::click());
+                        let can = self.snap.now.is_some();
+                        if can {
+                            let col = if hit.hovered() { Color32::WHITE } else { MUTED };
+                            chevron(ui.painter(), Pos2::new(hit_rect.right() - 12.0, hit_rect.center().y), !self.expanded, col);
+                            if hit.clicked() {
+                                self.expanded = !self.expanded;
+                            }
+                            hit.on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text(if self.expanded { "Recolher" } else { "Expandir capa" });
+                        }
+                    }
                     // ── centro: controles + linha do tempo
                     ui.allocate_ui_with_layout(Vec2::new(mid_w, 72.0), Layout::top_down(Align::LEFT), |ui| {
                         ui.spacing_mut().item_spacing.y = 6.0;
-                        ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(Vec2::new(mid_w, 46.0), Layout::left_to_right(Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 14.0;
                             ui.add_space(((mid_w - 230.0) / 2.0).max(0.0));
                             if icon_button(ui, Icon::Shuffle, 30.0, false, self.shuffle).on_hover_text("Aleatório").clicked() {
@@ -1727,7 +1909,7 @@ impl ZekApp {
                                 let _ = self.cmd_tx.send(Cmd::Repeat(self.repeat));
                             }
                         });
-                        ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(Vec2::new(mid_w, 20.0), Layout::left_to_right(Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 8.0;
                             let dur = self.snap.now.as_ref().map_or(0.0, |n| n.duration);
                             let max = dur.max(self.seek_val + 0.5).max(1.0);
@@ -1766,6 +1948,7 @@ impl ZekApp {
                     });
                 });
             });
+        self.bar_top = bar_resp.response.rect.top();
     }
 
     // ───────────────────────── UI: barra lateral ─────────────────────────
@@ -1989,7 +2172,7 @@ impl ZekApp {
                             ui.label(RichText::new(&self.snap.status).size(13.0).color(WARN));
                         }
                         ui.add_space(8.0);
-                        ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), 56.0), Layout::left_to_right(Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 14.0;
                             let same = self.snap.queue_pl == Some(sel) && self.snap.active;
                             let this_playing = same && !self.snap.paused;
@@ -2129,6 +2312,98 @@ impl ZekApp {
         });
     }
 
+    // ───────────────────────── UI: tela "Tocando agora" ─────────────────────────
+    fn ui_expanded(&mut self, ctx: &egui::Context) {
+        let t = ctx.animate_bool_with_time(egui::Id::new("np_open"), self.expanded, 0.22);
+        if t <= 0.001 {
+            return;
+        }
+        let Some(now) = self.snap.now.clone() else { return };
+        let e = 1.0 - (1.0 - t).powi(3);
+        let screen = ctx.screen_rect();
+        let bottom = if self.bar_top > screen.top() { self.bar_top } else { screen.bottom() - 98.0 };
+        let full = Rect::from_min_max(screen.min, Pos2::new(screen.max.x, bottom));
+        let rect = full.translate(Vec2::new(0.0, (1.0 - e) * full.height()));
+        let (tile1, tile2) = tile_colors(&now.title);
+        let has_cover = self.cover.is_some();
+        let (top_a, top_b) = match self.cover_color {
+            Some(c) => (c, lerp_color(c, ACCENT, 0.35)),
+            None => (scale_color(tile1, 0.62), scale_color(tile2, 0.62)),
+        };
+        let mut close = false;
+        egui::Area::new(egui::Id::new("np_area")).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
+            ui.set_clip_rect(full);
+            ui.allocate_exact_size(rect.size(), Sense::click());
+            let p = ui.painter().clone();
+            gradient_rect_4(&p, rect, top_a, top_b, BG, BG);
+
+            let w = rect.width();
+            let h = rect.height();
+            let s = (h * 0.60).min(w * 0.42).min(h - 170.0).max(120.0);
+            let block_h = s + 118.0;
+            let top = rect.top() + ((h - block_h) / 2.0).max(36.0);
+            let shift = if has_cover { 0.0 } else { s * 0.13 };
+            let cx = rect.center().x;
+            let cover = Rect::from_center_size(Pos2::new(cx - shift, top + s / 2.0), Vec2::splat(s));
+
+            // sombra suave atrás da capa
+            for i in 0..5 {
+                let grow = i as f32 * 5.0;
+                p.rect_filled(cover.expand(grow).translate(Vec2::new(0.0, 10.0)), 22.0 + grow, Color32::from_black_alpha(16));
+            }
+            // sem capa: um disco de vinil saindo por trás do quadrado
+            if !has_cover {
+                let vc = Pos2::new(cover.center().x + s * 0.30, cover.center().y);
+                let r = s * 0.47;
+                let dark = Color32::from_rgb(10, 12, 20);
+                p.circle_filled(vc, r, dark);
+                for k in [0.62_f32, 0.74, 0.86, 0.96] {
+                    p.circle_stroke(vc, r * k, stroke(1.0, Color32::from_white_alpha(16)));
+                }
+                p.circle_filled(vc, r * 0.32, lerp_color(tile1, tile2, 0.5));
+                p.circle_filled(vc, r * 0.05, dark);
+            }
+            if let Some(tex) = &self.cover {
+                ui.put(
+                    cover,
+                    egui::Image::from_texture(egui::load::SizedTexture::from_handle(tex))
+                        .fit_to_exact_size(Vec2::splat(s))
+                        .rounding(18.0),
+                );
+            } else {
+                rounded_gradient(&p, cover, 18.0, tile1, tile2);
+                p.text(cover.center(), Align2::CENTER_CENTER, initial(&now.title), FontId::proportional(s * 0.42), Color32::from_white_alpha(215));
+            }
+
+            // textos
+            let tw = (w * 0.80).min(900.0);
+            let ty = cover.bottom() + 28.0;
+            let tx = Pos2::new(cx, ty);
+            let clip = Rect::from_min_size(Pos2::new(cx - tw / 2.0, ty - 2.0), Vec2::new(tw, 112.0));
+            let pc = p.with_clip_rect(clip);
+            pc.text(tx, Align2::CENTER_TOP, &now.title, FontId::proportional(28.0), Color32::WHITE);
+            let artist = if now.artist.is_empty() { "Artista desconhecido" } else { now.artist.as_str() };
+            pc.text(Pos2::new(cx, ty + 42.0), Align2::CENTER_TOP, artist, FontId::proportional(16.0), Color32::from_rgb(196, 210, 238));
+            if !now.album.is_empty() {
+                pc.text(Pos2::new(cx, ty + 68.0), Align2::CENTER_TOP, &now.album, FontId::proportional(13.5), MUTED);
+            }
+
+            // botão de recolher (canto superior direito)
+            let br = Rect::from_center_size(Pos2::new(rect.right() - 38.0, rect.top() + 36.0), Vec2::splat(42.0));
+            let r = ui.interact(br, ui.id().with("np_close"), Sense::click());
+            if r.hovered() {
+                p.circle_filled(br.center(), 21.0, Color32::from_white_alpha(26));
+            }
+            chevron(&p, br.center(), false, Color32::WHITE);
+            if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Recolher").clicked() {
+                close = true;
+            }
+        });
+        if close {
+            self.expanded = false;
+        }
+    }
+
     // ───────────────────────── UI: janela de pastas ─────────────────────────
     fn ui_folders(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
         if !self.show_folders {
@@ -2177,6 +2452,7 @@ impl eframe::App for ZekApp {
         self.ui_sidebar(ctx, &mut acts);
         self.ui_central(ctx, &mut acts);
         self.ui_folders(ctx, &mut acts);
+        self.ui_expanded(ctx);
         for a in acts {
             self.handle(a);
         }

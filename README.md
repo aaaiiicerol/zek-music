@@ -7,7 +7,7 @@
 ![Rust](https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-AppImage-3b82f6?style=flat&logo=linux&logoColor=white)
 ![Windows](https://img.shields.io/badge/Windows-Instalador%20%2B%20Port%C3%A1til-0078d4?style=flat&logo=windows&logoColor=white)
-![Status](https://img.shields.io/badge/vers%C3%A3o-0.4.1-38bdf8?style=flat)
+![Status](https://img.shields.io/badge/vers%C3%A3o-0.5.0-38bdf8?style=flat)
 
 <img src="screenshots/zek-music.png" alt="Zek Music" width="900">
 
@@ -39,6 +39,7 @@ musicas/                 ← a pasta que você escolhe
 - ▶️ **Player integrado** — play/pause, anterior, próxima, linha do tempo com arraste, volume, aleatório e repetir (tudo / uma)
 - 🖼️ **Capa do álbum, artista e duração** lidos das tags dos arquivos
 - 🔎 **Busca** dentro da playlist
+- 🖼️ **Tela "Tocando agora"** — clique na capa do player para expandir, com fundo em degradê na cor da capa
 - ⌨️ **Teclas de mídia no Linux (MPRIS)** — próxima, anterior e play/pause do teclado funcionam mesmo com o app em segundo plano ou dentro de um jogo
 - 🎮 **Toca em segundo plano** — o áudio roda em thread própria e troca de música sozinho mesmo com a janela fechada ou minimizada
 - 🛠️ **Tolerante com arquivos problemáticos** — MP3 com etiquetas ID3 fora do padrão ou "cortados" são recuperados automaticamente
