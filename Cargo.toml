@@ -1,6 +1,6 @@
 [package]
 name = "zek-music"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Zek Music - player de músicas leve para Linux e Windows"
 
@@ -16,6 +16,8 @@ dirs = "5"
 rand = "0.8"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 symphonia = { version = "0.5", default-features = false, features = ["mp3"] }
+# aviso de nova versão (consulta o GitHub uma vez por dia) — precisa do TLS
+ureq = "2"
 
 # ── Linux: janelas X11/Wayland e teclas de mídia (MPRIS)
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -21,14 +21,16 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(target_os = "linux")]
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ───────────────────────── Cores (azul + escuro) ─────────────────────────
 const BG: Color32 = Color32::from_rgb(8, 12, 24);
@@ -40,7 +42,6 @@ const ROW_HOVER: Color32 = Color32::from_rgb(18, 28, 56);
 const SEL_BG: Color32 = Color32::from_rgb(22, 40, 86);
 const ACCENT: Color32 = Color32::from_rgb(59, 130, 246);
 const ACCENT_HI: Color32 = Color32::from_rgb(96, 165, 250);
-const CYAN: Color32 = Color32::from_rgb(34, 211, 238);
 const TEXT: Color32 = Color32::from_rgb(226, 233, 246);
 const MUTED: Color32 = Color32::from_rgb(124, 140, 175);
 const WARN: Color32 = Color32::from_rgb(251, 191, 100);
@@ -72,6 +73,32 @@ struct Playlist {
     id: u64,
     name: String,
     source: PlaylistSource,
+    /// Playlist de sessão (ex.: arquivos abertos por "Abrir com o Zek Music"):
+    /// existe só enquanto o programa está aberto e não é gravada no disco.
+    #[serde(skip)]
+    session: bool,
+}
+
+/// Onde o programa parou: playlist, música, posição e estado dos botões.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct SessionState {
+    playlist: Option<u64>,
+    track: Option<PathBuf>,
+    pos: f32,
+    was_playing: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+enum Repeat {
+    Off,
+    All,
+    One,
+}
+
+impl Default for Repeat {
+    fn default() -> Self {
+        Repeat::Off
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -81,11 +108,25 @@ struct Config {
     playlists: Vec<Playlist>, // a ordem do vetor é a ordem exibida
     next_id: u64,
     volume: f32,
+    muted: bool,
+    shuffle: bool,
+    repeat: Repeat,
+    /// Cor de destaque: índice na lista de paletas, ou uma cor escolhida à mão.
+    accent_idx: u8,
+    accent_custom: Option<[u8; 3]>,
+    session: Option<SessionState>,
+    /// Avisar quando sair versão nova no GitHub (uma consulta ao dia).
+    check_updates: bool,
+    last_update_check: i64,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { roots: vec![], playlists: vec![], next_id: 0, volume: 0.8 }
+        Self {
+            roots: vec![], playlists: vec![], next_id: 0, volume: 0.8, muted: false, shuffle: false,
+            repeat: Repeat::Off, accent_idx: 0, accent_custom: None, session: None,
+            check_updates: true, last_update_check: 0,
+        }
     }
 }
 
@@ -95,6 +136,8 @@ struct Meta {
     artist: String,
     album: String,
     duration: f32,
+    /// Número da faixa na etiqueta (ID3 etc.), quando existir.
+    track: Option<u32>,
 }
 
 fn config_path() -> PathBuf {
@@ -112,11 +155,38 @@ fn config_path() -> PathBuf {
     p
 }
 
+/// Pasta que guarda o registro de erros e as configurações (útil para o suporte).
+fn data_dir() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if dir.join("portable.txt").exists() {
+                return dir.join("dados");
+            }
+        }
+    }
+    let mut p = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    p.push("zek-music");
+    p
+}
+
 fn load_config() -> Config {
-    std::fs::read_to_string(config_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let p = config_path();
+    match fs::read_to_string(&p) {
+        Ok(s) => match serde_json::from_str(&s) {
+            Ok(c) => return c,
+            Err(e) => {
+                log_warn(format!("config.json com problema ({e}); tentando a cópia de segurança"));
+                let bak = p.with_extension("json.bak");
+                if let Ok(s2) = fs::read_to_string(&bak) {
+                    if let Ok(c) = serde_json::from_str(&s2) {
+                        return c;
+                    }
+                }
+                Config::default()
+            }
+        },
+        Err(_) => Config::default(),
+    }
 }
 
 // ───────────────────────── Utilidades ─────────────────────────
@@ -188,6 +258,199 @@ fn stroke(w: f32, c: Color32) -> Stroke {
     Stroke::new(w, c)
 }
 
+// ───────────────────────── Registro de erros ─────────────────────────
+// No Windows o programa não tem terminal: quando algo dá errado, o motivo fica
+// escrito neste arquivo. Dá para abrir a pasta pelo botão em "Ajustes".
+static LOG_FILE: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
+
+fn log_path() -> PathBuf {
+    data_dir().join("zek-music.log")
+}
+
+/// Segundos desde 1970 → "AAAA-MM-DD HH:MM:SS" (UTC, sem biblioteca externa).
+fn fmt_stamp(secs: u64) -> String {
+    let dias = (secs / 86400) as i64;
+    let s = secs % 86400;
+    let (h, mi, se) = (s / 3600, (s % 3600) / 60, s % 60);
+    // calendário: dias desde 1970 → ano/mês/dia
+    let d = dias + 719_468;
+    let era = if d >= 0 { d } else { d - 146_096 } / 146_097;
+    let doe = d - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", year, month, day, h, mi, se)
+}
+
+fn log_write(level: &str, msg: &str) {
+    if let Some(m) = LOG_FILE.get() {
+        if let Ok(mut g) = m.lock() {
+            if let Some(f) = g.as_mut() {
+                let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let _ = writeln!(f, "[{} {}] {}", fmt_stamp(secs), level, msg);
+            }
+        }
+    }
+}
+
+fn log_info(m: impl std::fmt::Display) {
+    log_write("INFO ", &m.to_string());
+}
+fn log_warn(m: impl std::fmt::Display) {
+    log_write("AVISO", &m.to_string());
+}
+fn log_err(m: impl std::fmt::Display) {
+    log_write("ERRO ", &m.to_string());
+}
+
+/// Últimas linhas do registro, para mostrar na janela de Ajustes.
+fn log_tail(n: usize) -> Vec<String> {
+    let txt = fs::read_to_string(log_path()).unwrap_or_default();
+    txt.lines().rev().take(n).collect::<Vec<_>>().into_iter().rev().map(|s| s.to_string()).collect()
+}
+
+fn log_init() {
+    let path = log_path();
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    // não deixa o arquivo crescer sem limite: com mais de 512 KB, começa outro
+    if let Ok(md) = fs::metadata(&path) {
+        if md.len() > 512 * 1024 {
+            let _ = fs::remove_file(&path);
+        }
+    }
+    let file = fs::OpenOptions::new().create(true).append(true).open(&path).ok();
+    let _ = LOG_FILE.set(Mutex::new(file));
+    // qualquer "panic" (erro grave) também fica registrado
+    let anterior = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log_write("ERRO ", &format!("panic: {info}"));
+        anterior(info);
+    }));
+    log_info(format!(
+        "Zek Music v{} iniciado ({}, {})",
+        env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH
+    ));
+}
+
+// ───────────────────────── Ordem das faixas ─────────────────────────
+
+/// Comparação "natural": "2 - música" vem antes de "10 - música".
+fn natural_cmp(a: &str, b: &str) -> Ordering {
+    let (ab, bb) = (a.as_bytes(), b.as_bytes());
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < ab.len() && j < bb.len() {
+        if ab[i].is_ascii_digit() && bb[j].is_ascii_digit() {
+            let (si, sj) = (i, j);
+            while i < ab.len() && ab[i].is_ascii_digit() {
+                i += 1;
+            }
+            while j < bb.len() && bb[j].is_ascii_digit() {
+                j += 1;
+            }
+            let (na, nb) = (&a[si..i], &b[sj..j]);
+            let (ta, tb) = (na.trim_start_matches('0'), nb.trim_start_matches('0'));
+            let ord = ta.len().cmp(&tb.len()).then_with(|| ta.cmp(tb)).then_with(|| na.len().cmp(&nb.len()));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        } else {
+            let ord = ab[i].to_ascii_lowercase().cmp(&bb[j].to_ascii_lowercase());
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            i += 1;
+            j += 1;
+        }
+    }
+    (ab.len() - i).cmp(&(bb.len() - j))
+}
+
+/// Ordena as faixas de uma pasta. Quando quase todas as músicas têm o número da
+/// faixa nas etiquetas (e esse número não se repete), segue a ordem do álbum;
+/// senão usa a ordem natural do nome do arquivo.
+fn order_tracks(files: &mut Vec<PathBuf>, metas: &HashMap<PathBuf, Meta>) {
+    let key = |p: &Path| p.to_string_lossy().to_lowercase();
+    let com_numero = files.iter().filter(|p| metas.get(p.as_path()).and_then(|m| m.track).is_some()).count();
+    let distintos: HashSet<u32> = files.iter().filter_map(|p| metas.get(p.as_path()).and_then(|m| m.track)).collect();
+    if com_numero * 10 >= files.len() * 8 && distintos.len() == com_numero {
+        let num = |p: &Path| metas.get(p).and_then(|m| m.track).unwrap_or(0);
+        files.sort_by(|a, b| num(a).cmp(&num(b)).then_with(|| natural_cmp(&key(a), &key(b))));
+    } else {
+        files.sort_by(|a, b| natural_cmp(&key(a), &key(b)));
+    }
+}
+
+// ───────────────────────── Cor de destaque escolhível ─────────────────────────
+#[derive(Clone, Copy)]
+struct Accent {
+    base: Color32,
+    hi: Color32,
+}
+
+impl Accent {
+    fn from_cfg(cfg: &Config) -> Self {
+        let base = match cfg.accent_custom {
+            Some(c) => Color32::from_rgb(c[0], c[1], c[2]),
+            None => {
+                let p = PALETTES[(cfg.accent_idx as usize).min(PALETTES.len() - 1)];
+                Color32::from_rgb(p.0[0], p.0[1], p.0[2])
+            }
+        };
+        Accent { base, hi: lerp_color(base, Color32::WHITE, 0.18) }
+    }
+}
+
+/// "v0.6.1" é mais novo que "v0.6.0"?
+fn versao_mais_nova(tag: &str, atual: &str) -> bool {
+    let nums = |s: &str| -> Vec<u32> {
+        s.trim_start_matches('v').split('.').filter_map(|p| p.parse::<u32>().ok()).collect()
+    };
+    let (a, b) = (nums(tag), nums(atual));
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+/// Versão mais nova no GitHub (etiqueta e endereço), se houver.
+/// Falta de internet ou resposta estranha = None, sem incomodar.
+fn fetch_latest_release() -> Option<(String, String)> {
+    let resp = ureq::get("https://api.github.com/repos/aaaiiicerol/zek-music/releases/latest")
+        .set("User-Agent", "zek-music")
+        .set("Accept", "application/vnd.github+json")
+        .timeout(std::time::Duration::from_secs(8))
+        .call()
+        .ok()?;
+    let body = resp.into_string().ok()?;
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let tag = v.get("tag_name")?.as_str()?.to_string();
+    let url = v.get("html_url").and_then(|u| u.as_str()).unwrap_or("https://github.com/aaaiiicerol/zek-music/releases").to_string();
+    Some((tag, url))
+}
+
+/// Abre um link no navegador (usado no aviso de nova versão).
+fn open_url(url: &str) {
+    let r = if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(url).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(url).spawn()
+    };
+    if r.is_err() {
+        log_warn("não foi possível abrir o navegador");
+    }
+}
+
 // ───────────────────────── Escaneamento de pastas ─────────────────────────
 fn collect_audio(dir: &Path, out: &mut Vec<PathBuf>, depth: u8) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -206,15 +469,35 @@ fn collect_audio(dir: &Path, out: &mut Vec<PathBuf>, depth: u8) {
     }
 }
 
-fn sort_tracks(v: &mut Vec<PathBuf>) {
-    v.sort_by_key(|p| p.to_string_lossy().to_lowercase());
+/// A raiz está acessível? Uma pasta que existe mas está vazia (ponto de
+/// montagem sem o disco montado) também conta como indisponível.
+fn root_available(r: &Path) -> bool {
+    if !r.exists() {
+        return false;
+    }
+    match fs::read_dir(r) {
+        Ok(mut rd) => rd.next().is_some(),
+        Err(_) => false,
+    }
+}
+
+/// Situação da pasta de uma playlist, para avisar o usuário sem perder nada.
+#[derive(Clone, Copy, PartialEq)]
+enum FolderStatus {
+    Ok,
+    Missing,
+    Unmounted,
 }
 
 /// Cada subpasta (com músicas) de uma pasta raiz vira uma playlist.
 /// Músicas soltas direto na raiz formam uma playlist com o nome da raiz.
+/// A ordem das faixas é decidida depois, quando as etiquetas são lidas.
 fn scan_roots(roots: &[PathBuf]) -> HashMap<PathBuf, Vec<PathBuf>> {
     let mut map = HashMap::new();
     for root in roots {
+        if !root_available(root) {
+            continue;
+        }
         let Ok(rd) = std::fs::read_dir(root) else { continue };
         let mut loose = vec![];
         for e in rd.flatten() {
@@ -226,7 +509,6 @@ fn scan_roots(roots: &[PathBuf]) -> HashMap<PathBuf, Vec<PathBuf>> {
                 let mut v = vec![];
                 collect_audio(&p, &mut v, 0);
                 if !v.is_empty() {
-                    sort_tracks(&mut v);
                     map.insert(p, v);
                 }
             } else if is_audio(&p) {
@@ -234,7 +516,6 @@ fn scan_roots(roots: &[PathBuf]) -> HashMap<PathBuf, Vec<PathBuf>> {
             }
         }
         if !loose.is_empty() {
-            sort_tracks(&mut loose);
             map.insert(root.clone(), loose);
         }
     }
@@ -261,6 +542,9 @@ fn read_info(path: &Path, fallback: Option<f32>, want_cover: bool) -> (Meta, Opt
             }
             if let Some(a) = tag.album() {
                 m.album = a.to_string();
+            }
+            if let Some(n) = tag.track() {
+                m.track = Some(n);
             }
             if want_cover {
                 if let Some(pic) = tag.pictures().first() {
@@ -293,15 +577,6 @@ fn dominant_color(img: &image::RgbaImage) -> Color32 {
     let (r, g, b) = (r / ws, g / ws, b / ws);
     let k = 150.0 / r.max(g).max(b).max(1.0);
     Color32::from_rgb((r * k).min(255.0) as u8, (g * k).min(255.0) as u8, (b * k).min(255.0) as u8)
-}
-
-fn make_texture(ctx: &egui::Context, bytes: &[u8]) -> Option<(egui::TextureHandle, Color32)> {
-    let img = image::load_from_memory(bytes).ok()?;
-    let img = img.thumbnail(320, 320).to_rgba8();
-    let color = dominant_color(&img);
-    let size = [img.width() as usize, img.height() as usize];
-    let ci = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
-    Some((ctx.load_texture("cover", ci, egui::TextureOptions::LINEAR), color))
 }
 
 // ───────────────────────── Decodificação (com plano B) ─────────────────────────
@@ -654,14 +929,14 @@ fn gradient_rect_v(p: &egui::Painter, rect: Rect, top: Color32, bottom: Color32)
     p.add(egui::Shape::mesh(m));
 }
 
-fn equalizer(p: &egui::Painter, center: Pos2, t: f64, animate: bool) {
+fn equalizer(p: &egui::Painter, center: Pos2, t: f64, animate: bool, accent_hi: Color32) {
     for i in 0..3 {
         let h = if animate { 4.0 + 9.0 * (((t * 6.0 + i as f64 * 1.7).sin() * 0.5 + 0.5) as f32) } else { 5.0 };
         let x = center.x - 6.0 + i as f32 * 6.0;
         p.rect_filled(
             Rect::from_min_max(Pos2::new(x - 1.6, center.y + 7.0 - h), Pos2::new(x + 1.6, center.y + 7.0)),
             1.0,
-            ACCENT_HI,
+            accent_hi,
         );
     }
 }
@@ -687,14 +962,14 @@ fn arrow_head(p: &egui::Painter, tip: Pos2, s: f32, col: Color32) {
     ));
 }
 
-fn icon_button(ui: &mut egui::Ui, icon: Icon, size: f32, accent: bool, active: bool) -> egui::Response {
+fn icon_button(ui: &mut egui::Ui, icon: Icon, size: f32, accent: bool, active: bool, acc: Accent) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     let hov = resp.hovered();
     let toggle_like = matches!(icon, Icon::Shuffle | Icon::Repeat | Icon::RepeatOne | Icon::Volume | Icon::Muted);
     let col = if accent {
         Color32::WHITE
     } else if active {
-        ACCENT_HI
+        acc.hi
     } else if hov {
         Color32::WHITE
     } else if toggle_like {
@@ -704,7 +979,7 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, size: f32, accent: bool, active: b
     };
     let p = ui.painter();
     if accent {
-        p.circle_filled(rect.center(), size / 2.0, if hov { ACCENT_HI } else { ACCENT });
+        p.circle_filled(rect.center(), size / 2.0, if hov { acc.hi } else { acc.base });
     }
     let c = rect.center();
     let s = size * 0.2;
@@ -768,7 +1043,7 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, size: f32, accent: bool, active: b
         }
     }
     if active && toggle_like {
-        p.circle_filled(Pos2::new(c.x, rect.bottom() - 1.5), 1.8, ACCENT_HI);
+        p.circle_filled(Pos2::new(c.x, rect.bottom() - 1.5), 1.8, acc.hi);
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -794,7 +1069,7 @@ struct BarOut {
 }
 
 /// Barra de progresso/volume desenhada à mão (clique e arraste).
-fn bar(ui: &mut egui::Ui, value: &mut f32, max: f32, width: f32, enabled: bool) -> BarOut {
+fn bar(ui: &mut egui::Ui, value: &mut f32, max: f32, width: f32, enabled: bool, acc: Accent) -> BarOut {
     let sense = if enabled { Sense::click_and_drag() } else { Sense::hover() };
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 16.0), sense);
     let mut out = BarOut { changed: false, released: false, dragging: false };
@@ -818,7 +1093,7 @@ fn bar(ui: &mut egui::Ui, value: &mut f32, max: f32, width: f32, enabled: bool) 
     p.rect_filled(rail, rail_h / 2.0, RAIL);
     let fill = Rect::from_min_max(rail.min, Pos2::new(rail.left() + rail.width() * frac, rail.max.y));
     if enabled {
-        p.rect_filled(fill, rail_h / 2.0, if hot { ACCENT_HI } else { ACCENT });
+        p.rect_filled(fill, rail_h / 2.0, if hot { acc.hi } else { acc.base });
     }
     if hot {
         p.circle_filled(Pos2::new(fill.right(), cy), 6.5, Color32::WHITE);
@@ -838,18 +1113,14 @@ fn columns(rect: Rect) -> (f32, f32, f32) {
 }
 
 // ───────────────────────── Estado do app ─────────────────────────
-#[derive(Clone, Copy, PartialEq)]
-enum Repeat {
-    Off,
-    All,
-    One,
-}
 
 // ───────────────────────── Motor de áudio (thread própria) ─────────────────────────
 // Roda separado da janela: continua tocando e trocando de música mesmo com o
 // programa em segundo plano (ex.: dentro de um jogo) e recebe as teclas de mídia.
 enum Cmd {
     PlayQueue { queue: Vec<PathBuf>, index: usize, playlist: Option<u64> },
+    /// Retomar a última sessão: mesma fila, posição e se deve voltar a tocar.
+    Restore { queue: Vec<PathBuf>, index: usize, pos: f32, play: bool, playlist: Option<u64> },
     Play,
     Pause,
     Toggle,
@@ -948,7 +1219,15 @@ struct Engine {
 
 impl Engine {
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-    fn new(rx: Receiver<Cmd>, tx: Sender<Cmd>, shared: Arc<Mutex<Shared>>, ctx: egui::Context, volume: f32) -> Self {
+    fn new(
+        rx: Receiver<Cmd>,
+        tx: Sender<Cmd>,
+        shared: Arc<Mutex<Shared>>,
+        ctx: egui::Context,
+        volume: f32,
+        shuffle: bool,
+        repeat: Repeat,
+    ) -> Self {
         Self {
             rx,
             shared,
@@ -959,8 +1238,8 @@ impl Engine {
             qindex: 0,
             queue_pl: None,
             paused: false,
-            shuffle: false,
-            repeat: Repeat::Off,
+            shuffle,
+            repeat,
             volume,
             last_pos: 0.0,
             device_name: default_output_name(),
@@ -998,6 +1277,7 @@ impl Engine {
         self.stall_since = None;
         self.stall_pos = -1.0;
         if self.stream.is_none() {
+            log_err("nenhuma saída de áudio encontrada");
             self.set_status("Nenhuma saída de áudio encontrada. Conecte um dispositivo e toque de novo.".into());
             self.publish_full();
             self.mpris_update(false);
@@ -1083,6 +1363,31 @@ impl Engine {
                 self.queue = queue;
                 self.queue_pl = playlist;
                 self.play_index(index);
+            }
+            Cmd::Restore { queue, index, pos, play, playlist } => {
+                self.queue = queue;
+                self.queue_pl = playlist;
+                self.qindex = index;
+                if self.play_index(index) {
+                    if pos > 1.0 {
+                        if let Some(s) = &self.sink {
+                            let _ = s.try_seek(Duration::from_secs_f32(pos));
+                        }
+                    }
+                    if !play {
+                        if let Some(s) = &self.sink {
+                            s.pause();
+                        }
+                        self.paused = true;
+                    }
+                    self.set_status(if play {
+                        "Retomando de onde você parou".into()
+                    } else {
+                        "Última música carregada — aperte play".into()
+                    });
+                    self.publish_full();
+                    self.mpris_update(true);
+                }
             }
             Cmd::Play => {
                 if self.sink.is_none() || self.paused {
@@ -1200,6 +1505,8 @@ impl Engine {
         let source = match make_source(&path) {
             Ok(s) => s,
             Err(e) => {
+                let msg = format!("não foi possível tocar {}: {e}", path.display());
+                log_err(&msg);
                 self.set_status(format!("Não foi possível tocar \"{}\": {}", clean_title(&stem(&path)), e));
                 self.publish_full();
                 return false;
@@ -1347,6 +1654,13 @@ enum Act {
     AddTo(u64, PathBuf),
     RemoveTrack(usize),
     AddFiles,
+    /// Mover uma playlist (arrastando) para outra posição.
+    MovePlaylistTo(u64, usize),
+    SetAccent(u8),
+    SetAccentCustom(Option<[u8; 3]>),
+    SetCheckUpdates(bool),
+    CheckUpdates,
+    OpenDataDir,
     Toggle,
     Next,
     Prev,
@@ -1384,24 +1698,96 @@ struct ZekApp {
     fs_rx: Receiver<()>,
     dirty_since: Option<Instant>,
     scan_rx: Option<Receiver<ScanMsg>>,
+    /// Cor de destaque escolhida em Ajustes (aplica em todo o programa).
+    accent: Accent,
+    /// Quais pastas raiz estão acessíveis agora (disco montado ou não).
+    root_ok: HashMap<PathBuf, bool>,
+    /// Onde o programa parou na última vez, para retomar ao abrir.
+    restore: Option<SessionState>,
+    /// Capa decodificada fora da tela, para não travar ao trocar de música.
+    cover_tx: Sender<CoverMsg>,
+    cover_rx: Receiver<CoverMsg>,
+    /// Aviso de nova versão (consulta o GitHub).
+    upd_tx: Sender<(String, String)>,
+    upd_rx: Receiver<(String, String)>,
+    update_info: Option<(String, String)>,
+    upd_dismissed: bool,
+    show_settings: bool,
+    /// Playlist sendo arrastada na lista (para reordenar ao soltar).
+    drag_pl: Option<u64>,
+    drag_target: Option<usize>,
+    last_session_save: Instant,
+}
+
+/// Capa já decodificada, pronta para virar textura (decodificação fora da tela).
+struct CoverMsg {
+    gen: u64,
+    img: egui::ColorImage,
+    color: Color32,
+}
+
+/// Decodifica a capa fora da thread da janela: capas grandes demoram e
+/// faziam a interface engasgar na troca de música.
+fn decode_cover(bytes: &[u8]) -> Option<(egui::ColorImage, Color32)> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let img = img.thumbnail(320, 320).to_rgba8();
+    let color = dominant_color(&img);
+    let size = [img.width() as usize, img.height() as usize];
+    let ci = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+    Some((ci, color))
 }
 
 impl ZekApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        setup_style(&cc.egui_ctx);
         let cfg = load_config();
+        let accent = Accent::from_cfg(&cfg);
+        setup_style(&cc.egui_ctx, accent);
         let (fs_tx, fs_rx) = mpsc::channel();
         let selected = cfg.playlists.first().map(|p| p.id);
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let (vol0, shuf0, rep0, mud0, mut restaurar) =
+            (cfg.volume, cfg.shuffle, cfg.repeat, cfg.muted, cfg.session.clone());
         let shared = Arc::new(Mutex::new(Shared::default()));
         {
-            let (sh, cx, tx, vol) = (shared.clone(), cc.egui_ctx.clone(), cmd_tx.clone(), cfg.volume);
+            let (sh, cx, tx, vol) = (shared.clone(), cc.egui_ctx.clone(), cmd_tx.clone(), vol0);
             std::thread::spawn(move || {
-                Engine::new(cmd_rx, tx, sh, cx, vol).run();
+                Engine::new(cmd_rx, tx, sh, cx, vol, shuf0, rep0).run();
             });
+        }
+        // "Abrir com o Zek Music": duplo clique num .mp3 abre o programa com ele
+        let abertos: Vec<PathBuf> = std::env::args_os()
+            .skip(1)
+            .map(PathBuf::from)
+            .filter(|p| is_audio(p) && p.exists())
+            .collect();
+        if !abertos.is_empty() {
+            log_info(format!("programa aberto com {} arquivo(s) para tocar", abertos.len()));
+        }
+        let (cover_tx, cover_rx) = mpsc::channel();
+        let (upd_tx, upd_rx) = mpsc::channel();
+        if mud0 {
+            // começa silenciado se estava silenciado ao fechar
+            let _ = cmd_tx.send(Cmd::Volume(0.0));
+        }
+        // arquivos abertos por "Abrir com" têm prioridade sobre a última sessão
+        if !abertos.is_empty() {
+            restaurar = None;
         }
         let mut app = Self {
             ctx: cc.egui_ctx.clone(),
+            accent,
+            root_ok: HashMap::new(),
+            restore: restaurar,
+            cover_tx,
+            cover_rx,
+            upd_tx,
+            upd_rx,
+            update_info: None,
+            upd_dismissed: false,
+            show_settings: false,
+            drag_pl: None,
+            drag_target: None,
+            last_session_save: Instant::now(),
             cfg,
             tracks: HashMap::new(),
             meta: HashMap::new(),
@@ -1418,9 +1804,9 @@ impl ZekApp {
             cover_gen: 0,
             expanded: false,
             bar_top: 0.0,
-            shuffle: false,
-            repeat: Repeat::Off,
-            muted: false,
+            shuffle: shuf0,
+            repeat: rep0,
+            muted: mud0,
             seek_val: 0.0,
             seeking: false,
             watcher: None,
@@ -1429,21 +1815,140 @@ impl ZekApp {
             dirty_since: None,
             scan_rx: None,
         };
+        app.refresh_root_ok();
+        if !abertos.is_empty() {
+            app.restore = None;
+            app.open_files(abertos);
+        }
         if !app.cfg.roots.is_empty() {
             app.restart_watcher();
             app.start_scan();
         }
+        // uma consulta ao GitHub por dia, sem segurar a abertura do programa
+        if app.cfg.check_updates && app.due_update_check() {
+            app.spawn_update_check();
+        }
         app
     }
 
-    fn save_config(&self) {
+    /// Guarda o estado atual no disco: playlists, volume, onde parou.
+    /// As playlists de sessão (arquivos abertos) ficam de fora.
+    fn save_config(&mut self) {
         let p = config_path();
         if let Some(dir) = p.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            let _ = fs::create_dir_all(dir);
         }
-        if let Ok(s) = serde_json::to_string_pretty(&self.cfg) {
-            let _ = std::fs::write(p, s);
+        let sessoes: Vec<Playlist> = self.cfg.playlists.iter().filter(|p| p.session).cloned().collect();
+        self.cfg.playlists.retain(|p| !p.session);
+        self.cfg.muted = self.muted;
+        self.cfg.shuffle = self.shuffle;
+        self.cfg.repeat = self.repeat;
+        self.cfg.session = Some(SessionState {
+            playlist: self.selected,
+            track: self.snap.cur_path.clone(),
+            pos: self.snap.pos,
+            was_playing: self.snap.active && !self.snap.paused,
+        });
+        // cópia de segurança: se o arquivo estragar, as playlists não se perdem
+        let bak = p.with_extension("json.bak");
+        let _ = fs::remove_file(&bak);
+        let _ = fs::rename(&p, &bak);
+        let r = serde_json::to_string_pretty(&self.cfg).ok().and_then(|s| fs::write(&p, s).ok());
+        if r.is_none() {
+            log_warn(format!("não foi possível salvar as configurações em {}", p.display()));
         }
+        if !sessoes.is_empty() {
+            self.cfg.playlists.extend(sessoes);
+        }
+    }
+
+    /// Quais pastas raiz estão montadas agora (para avisar sem apagar nada).
+    fn refresh_root_ok(&mut self) {
+        self.root_ok = self.cfg.roots.iter().map(|r| (r.clone(), root_available(r))).collect();
+    }
+
+    fn estado_pasta(&self, path: &Path) -> FolderStatus {
+        match self.cfg.roots.iter().find(|r| path.starts_with(r)) {
+            None => FolderStatus::Missing,
+            Some(raiz) => {
+                if self.root_ok.get(raiz).copied().unwrap_or(true) {
+                    if path.exists() {
+                        FolderStatus::Ok
+                    } else {
+                        FolderStatus::Missing
+                    }
+                } else {
+                    FolderStatus::Unmounted
+                }
+            }
+        }
+    }
+
+    /// Arquivos recebidos por "Abrir com o Zek Music" (ou soltos na janela).
+    fn open_files(&mut self, files: Vec<PathBuf>) {
+        if files.is_empty() {
+            return;
+        }
+        let id = self
+            .cfg
+            .playlists
+            .iter()
+            .find(|p| p.session)
+            .map(|p| p.id)
+            .unwrap_or_else(|| {
+                let id = self.next_id();
+                self.cfg.playlists.push(Playlist {
+                    id,
+                    name: "Abertos agora".into(),
+                    source: PlaylistSource::Custom(vec![]),
+                    session: true,
+                });
+                id
+            });
+        let mut novos = vec![];
+        if let Some(pl) = self.cfg.playlists.iter_mut().find(|p| p.id == id) {
+            if let PlaylistSource::Custom(v) = &mut pl.source {
+                for f in files {
+                    if !v.contains(&f) {
+                        v.push(f.clone());
+                        novos.push(f);
+                    }
+                }
+            }
+        }
+        self.selected = Some(id);
+        let alvo = self.tracks_of(id);
+        let idx = novos.last().and_then(|u| alvo.iter().position(|x| x == u)).unwrap_or(0);
+        let _ = self.cmd_tx.send(Cmd::PlayQueue { queue: alvo, index: idx, playlist: Some(id) });
+        log_info(format!("tocando {} arquivo(s) recebido(s) do sistema", novos.len()));
+    }
+
+    // ── aviso de nova versão ──
+    fn due_update_check(&self) -> bool {
+        let hoje = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64 / 86400).unwrap_or(0);
+        hoje > self.cfg.last_update_check
+    }
+
+    fn spawn_update_check(&mut self) {
+        let tx = self.upd_tx.clone();
+        let ctx = self.ctx.clone();
+        self.cfg.last_update_check =
+            SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64 / 86400).unwrap_or(0);
+        self.save_config();
+        std::thread::spawn(move || {
+            match fetch_latest_release() {
+                Some((tag, url)) => {
+                    let _ = tx.send((tag, url));
+                }
+                None => log_warn("não foi possível consultar as versões no GitHub (sem internet?)"),
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// "v0.6.1" é mais novo que "v0.6.0"?
+    fn nova_versao(&self, tag: &str) -> bool {
+        versao_mais_nova(tag, env!("CARGO_PKG_VERSION"))
     }
 
     fn next_id(&mut self) -> u64 {
@@ -1478,28 +1983,49 @@ impl ZekApp {
     fn start_scan(&mut self) {
         let (tx, rx) = mpsc::channel();
         let roots = self.cfg.roots.clone();
-        let known: HashSet<PathBuf> = self.meta.keys().cloned().collect();
+        // cópia do que já se sabe: evita reler as etiquetas de toda a biblioteca
+        let known: HashMap<PathBuf, Meta> = self.meta.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let folders = scan_roots(&roots);
-            let mut todo: Vec<PathBuf> = vec![];
+            let t0 = Instant::now();
+            let mut folders = scan_roots(&roots);
+            let mut todas: Vec<PathBuf> = vec![];
+            let mut vistos: HashSet<PathBuf> = HashSet::new();
             for v in folders.values() {
                 for p in v {
-                    if !known.contains(p) {
-                        todo.push(p.clone());
+                    if vistos.insert(p.clone()) {
+                        todas.push(p.clone());
                     }
                 }
             }
+            let mut novas: Vec<(PathBuf, Meta)> = vec![];
+            for p in &todas {
+                if !known.contains_key(p) {
+                    let (m, _) = read_info(p, None, false);
+                    novas.push((p.clone(), m));
+                }
+            }
+            let mut eff = known;
+            for (p, m) in &novas {
+                eff.insert(p.clone(), m.clone());
+            }
+            for v in folders.values_mut() {
+                order_tracks(v, &eff);
+            }
+            let n = folders.len();
             let _ = tx.send(ScanMsg::Folders(folders));
             ctx.request_repaint();
-            for chunk in todo.chunks(40) {
-                let batch: Vec<(PathBuf, Meta)> = chunk.iter().map(|p| (p.clone(), read_info(p, None, false).0)).collect();
-                if tx.send(ScanMsg::Metas(batch)).is_err() {
+            for chunk in novas.chunks(40) {
+                if tx.send(ScanMsg::Metas(chunk.to_vec())).is_err() {
                     return;
                 }
                 ctx.request_repaint();
             }
             let _ = tx.send(ScanMsg::Done);
+            log_info(format!(
+                "biblioteca atualizada: {} pastas, {} músicas novas, {:.1}s",
+                n, novas.len(), t0.elapsed().as_secs_f32()
+            ));
             ctx.request_repaint();
         });
         self.scan_rx = Some(rx);
@@ -1507,8 +2033,26 @@ impl ZekApp {
 
     fn apply_scan(&mut self, map: HashMap<PathBuf, Vec<PathBuf>>) {
         let roots = self.cfg.roots.clone();
+        // pastas montadas? (pendrive/rede podem não estar montados ao abrir)
+        self.refresh_root_ok();
+        for (r, ok) in &self.root_ok {
+            if !ok {
+                log_warn(format!("pasta da biblioteca indisponível: {}", r.display()));
+            }
+        }
+        // Some com a playlist só quando a pasta raiz está acessível e a pasta
+        // realmente sumiu. Se o disco não está montado, GUARDA a playlist
+        // (nomes e ordem) e avisa "pasta indisponível".
+        let ok = self.root_ok.clone();
         self.cfg.playlists.retain(|p| match &p.source {
-            PlaylistSource::Folder(path) => path.exists() && roots.iter().any(|r| path.starts_with(r)),
+            PlaylistSource::Folder(path) => {
+                let Some(raiz) = roots.iter().find(|r| path.starts_with(r)) else {
+                    return false; // não pertence a nenhuma pasta da biblioteca
+                };
+                let montada = ok.get(raiz).copied().unwrap_or(true);
+                // disco desmontado: guarda. disco montado e pasta sumiu: some.
+                !montada || path.exists()
+            }
             _ => true,
         });
         let mut keys: Vec<PathBuf> = map.keys().cloned().collect();
@@ -1517,7 +2061,7 @@ impl ZekApp {
             let exists = self.cfg.playlists.iter().any(|p| matches!(&p.source, PlaylistSource::Folder(x) if *x == k));
             if !exists {
                 let id = self.next_id();
-                self.cfg.playlists.push(Playlist { id, name: folder_name(&k), source: PlaylistSource::Folder(k) });
+                self.cfg.playlists.push(Playlist { id, name: folder_name(&k), source: PlaylistSource::Folder(k), session: false });
             }
         }
         self.tracks = map;
@@ -1584,12 +2128,19 @@ impl ZekApp {
                         self.meta.insert(p, mt);
                     }
                 }
-                ScanMsg::Done => self.scan_rx = None,
+                ScanMsg::Done => {
+                    self.scan_rx = None;
+                    // com todas as etiquetas lidas, refaz a ordem das faixas
+                    for v in self.tracks.values_mut() {
+                        order_tracks(v, &self.meta);
+                    }
+                }
             }
         }
         if gone {
             self.scan_rx = None;
         }
+        self.try_restore();
         // Estado do motor de áudio (que roda em outra thread)
         let mut new_cover: Option<Option<Vec<u8>>> = None;
         {
@@ -1609,17 +2160,43 @@ impl ZekApp {
                 new_cover = Some(g.cover.clone());
             }
         }
+        // A capa é decodificada fora da tela: capa grande não trava mais a janela.
         if let Some(c) = new_cover {
-            match c.and_then(|b| make_texture(&self.ctx, &b)) {
-                Some((tex, col)) => {
-                    self.cover = Some(tex);
-                    self.cover_color = Some(col);
+            match c {
+                Some(bytes) => {
+                    let tx = self.cover_tx.clone();
+                    let gen = self.cover_gen;
+                    std::thread::spawn(move || {
+                        if let Some((img, color)) = decode_cover(&bytes) {
+                            let _ = tx.send(CoverMsg { gen, img, color });
+                        }
+                    });
                 }
                 None => {
                     self.cover = None;
                     self.cover_color = None;
                 }
             }
+        }
+        while let Ok(m) = self.cover_rx.try_recv() {
+            if m.gen == self.cover_gen {
+                self.cover_color = Some(m.color);
+                self.cover = Some(self.ctx.load_texture("cover", m.img, egui::TextureOptions::LINEAR));
+            }
+        }
+        // Resposta da consulta de nova versão
+        while let Ok((tag, url)) = self.upd_rx.try_recv() {
+            if self.nova_versao(&tag) {
+                log_info(format!("versão nova no GitHub: {tag}"));
+                self.update_info = Some((tag, url));
+            } else {
+                log_info(format!("nenhuma versão mais nova que {}", env!("CARGO_PKG_VERSION")));
+            }
+        }
+        // Guarda de vez em quando o ponto onde parou (música, volume, posição)
+        if self.last_session_save.elapsed() >= Duration::from_secs(15) {
+            self.last_session_save = Instant::now();
+            self.save_config();
         }
         if self.expanded && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.expanded = false;
@@ -1650,6 +2227,48 @@ impl ZekApp {
             }
             self.add_files_to_selected(files);
         }
+    }
+
+    /// Retoma a última música: só depois que a playlist tem as faixas carregadas.
+    fn try_restore(&mut self) {
+        let Some(s) = self.restore.clone() else { return };
+        let Some(plid) = s.playlist else {
+            self.restore = None;
+            return;
+        };
+        let Some(pl) = self.cfg.playlists.iter().find(|p| p.id == plid) else {
+            self.restore = None;
+            return;
+        };
+        let estado = match &pl.source {
+            PlaylistSource::Folder(p) => self.estado_pasta(p),
+            PlaylistSource::Custom(_) => FolderStatus::Ok,
+        };
+        let tr = self.tracks_of(plid);
+        if tr.is_empty() {
+            // pasta desmontada ou apagada: não insiste em restaurar
+            if estado != FolderStatus::Ok || self.scan_rx.is_none() {
+                self.restore = None;
+            }
+            return;
+        }
+        if s.track.is_none() {
+            // nada estava tocando ao fechar: só lembra a playlist escolhida
+            self.selected = Some(plid);
+            self.restore = None;
+            return;
+        }
+        let idx = s.track.as_ref().and_then(|t| tr.iter().position(|x| x == t)).unwrap_or(0);
+        let _ = self.cmd_tx.send(Cmd::Restore {
+            queue: tr,
+            index: idx,
+            pos: s.pos.max(0.0),
+            play: s.was_playing,
+            playlist: Some(plid),
+        });
+        self.selected = Some(plid);
+        self.restore = None;
+        log_info("retomando de onde o programa parou");
     }
 
     fn add_files_to_selected(&mut self, files: Vec<PathBuf>) {
@@ -1724,7 +2343,7 @@ impl ZekApp {
             }
             Act::NewPlaylist => {
                 let id = self.next_id();
-                self.cfg.playlists.push(Playlist { id, name: "Nova playlist".into(), source: PlaylistSource::Custom(vec![]) });
+                self.cfg.playlists.push(Playlist { id, name: "Nova playlist".into(), source: PlaylistSource::Custom(vec![]), session: false });
                 self.selected = Some(id);
                 self.search.clear();
                 self.save_config();
@@ -1732,7 +2351,7 @@ impl ZekApp {
             }
             Act::NewWith(path) => {
                 let id = self.next_id();
-                self.cfg.playlists.push(Playlist { id, name: "Nova playlist".into(), source: PlaylistSource::Custom(vec![path]) });
+                self.cfg.playlists.push(Playlist { id, name: "Nova playlist".into(), source: PlaylistSource::Custom(vec![path]), session: false });
                 self.save_config();
             }
             Act::AddFolders => {
@@ -1793,6 +2412,54 @@ impl ZekApp {
             Act::AddFiles => {
                 if let Some(files) = rfd::FileDialog::new().set_title("Adicionar músicas").add_filter("Áudio", AUDIO_EXT).pick_files() {
                     self.add_files_to_selected(files);
+                }
+            }
+            Act::MovePlaylistTo(origem, dest) => {
+                if let Some(de) = self.cfg.playlists.iter().position(|p| p.id == origem) {
+                    let item = self.cfg.playlists.remove(de);
+                    let mut d = dest.min(self.cfg.playlists.len());
+                    if de < d {
+                        d -= 1;
+                    }
+                    self.cfg.playlists.insert(d, item);
+                    self.save_config();
+                }
+            }
+            Act::SetAccent(i) => {
+                self.cfg.accent_custom = None;
+                self.cfg.accent_idx = i;
+                let a = Accent::from_cfg(&self.cfg);
+                self.accent = a;
+                setup_style(&self.ctx, a);
+                self.save_config();
+                self.ctx.request_repaint();
+            }
+            Act::SetAccentCustom(cor) => {
+                self.cfg.accent_custom = cor;
+                let a = Accent::from_cfg(&self.cfg);
+                self.accent = a;
+                setup_style(&self.ctx, a);
+                self.save_config();
+                self.ctx.request_repaint();
+            }
+            Act::SetCheckUpdates(v) => {
+                self.cfg.check_updates = v;
+                self.save_config();
+            }
+            Act::CheckUpdates => {
+                self.upd_dismissed = false;
+                self.spawn_update_check();
+            }
+            Act::OpenDataDir => {
+                let d = data_dir();
+                let _ = fs::create_dir_all(&d);
+                let r = if cfg!(target_os = "windows") {
+                    std::process::Command::new("explorer").arg(&d).spawn()
+                } else {
+                    std::process::Command::new("xdg-open").arg(&d).spawn()
+                };
+                if r.is_err() {
+                    log_warn(format!("não foi possível abrir {}", d.display()));
                 }
             }
             Act::Toggle => {
@@ -1880,19 +2547,19 @@ impl ZekApp {
                         ui.allocate_ui_with_layout(Vec2::new(mid_w, 46.0), Layout::left_to_right(Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 14.0;
                             ui.add_space(((mid_w - 230.0) / 2.0).max(0.0));
-                            if icon_button(ui, Icon::Shuffle, 30.0, false, self.shuffle).on_hover_text("Aleatório").clicked() {
+                            if icon_button(ui, Icon::Shuffle, 30.0, false, self.shuffle, self.accent).on_hover_text("Aleatório").clicked() {
                                 self.shuffle = !self.shuffle;
                                 let _ = self.cmd_tx.send(Cmd::Shuffle(self.shuffle));
                             }
-                            if icon_button(ui, Icon::Prev, 34.0, false, false).clicked() {
+                            if icon_button(ui, Icon::Prev, 34.0, false, false, self.accent).clicked() {
                                 acts.push(Act::Prev);
                             }
                             let playing = self.snap.active && !self.snap.paused;
                             let ic = if playing { Icon::Pause } else { Icon::Play };
-                            if icon_button(ui, ic, 46.0, true, false).clicked() {
+                            if icon_button(ui, ic, 46.0, true, false, self.accent).clicked() {
                                 acts.push(Act::Toggle);
                             }
-                            if icon_button(ui, Icon::Next, 34.0, false, false).clicked() {
+                            if icon_button(ui, Icon::Next, 34.0, false, false, self.accent).clicked() {
                                 acts.push(Act::Next);
                             }
                             let (ri, tip) = match self.repeat {
@@ -1900,7 +2567,7 @@ impl ZekApp {
                                 Repeat::All => (Icon::Repeat, "Repetir: tudo"),
                                 Repeat::One => (Icon::RepeatOne, "Repetir: uma música"),
                             };
-                            if icon_button(ui, ri, 30.0, false, self.repeat != Repeat::Off).on_hover_text(tip).clicked() {
+                            if icon_button(ui, ri, 30.0, false, self.repeat != Repeat::Off, self.accent).on_hover_text(tip).clicked() {
                                 self.repeat = match self.repeat {
                                     Repeat::Off => Repeat::All,
                                     Repeat::All => Repeat::One,
@@ -1915,7 +2582,7 @@ impl ZekApp {
                             let max = dur.max(self.seek_val + 0.5).max(1.0);
                             ui.add_sized([36.0, 16.0], egui::Label::new(RichText::new(fmt_time(self.seek_val)).size(12.0).color(MUTED)));
                             let mut v = self.seek_val;
-                            let out = bar(ui, &mut v, max, (mid_w - 36.0 * 2.0 - 16.0).max(60.0), self.snap.active);
+                            let out = bar(ui, &mut v, max, (mid_w - 36.0 * 2.0 - 16.0).max(60.0), self.snap.active, self.accent);
                             self.seeking = out.dragging;
                             if out.changed {
                                 self.seek_val = v;
@@ -1931,14 +2598,14 @@ impl ZekApp {
                         let mut changed = false;
                         let shown = if self.muted { 0.0 } else { self.cfg.volume };
                         let mut v = shown;
-                        let out = bar(ui, &mut v, 1.0, 110.0, true);
+                        let out = bar(ui, &mut v, 1.0, 110.0, true, self.accent);
                         if out.changed {
                             self.cfg.volume = v;
                             self.muted = false;
                             changed = true;
                         }
                         let ic = if self.muted || self.cfg.volume <= 0.001 { Icon::Muted } else { Icon::Volume };
-                        if icon_button(ui, ic, 32.0, false, false).on_hover_text("Silenciar").clicked() {
+                        if icon_button(ui, ic, 32.0, false, false, self.accent).on_hover_text("Silenciar").clicked() {
                             self.muted = !self.muted;
                             changed = true;
                         }
@@ -1959,10 +2626,11 @@ impl ZekApp {
             .frame(Frame::none().fill(PANEL).inner_margin(Margin::symmetric(12.0, 16.0)))
             .show(ctx, |ui| {
                 let time = ui.input(|i| i.time);
+                let acc = self.accent;
                 ui.horizontal(|ui| {
                     ui.add_space(4.0);
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
-                    rounded_gradient(ui.painter(), r, 11.0, ACCENT, CYAN);
+                    rounded_gradient(ui.painter(), r, 11.0, acc.base, acc.hi);
                     let c = r.center();
                     ui.painter().add(egui::Shape::convex_polygon(
                         vec![Pos2::new(c.x - 4.5, c.y - 7.0), Pos2::new(c.x - 4.5, c.y + 7.0), Pos2::new(c.x + 8.0, c.y)],
@@ -1972,10 +2640,51 @@ impl ZekApp {
                     ui.add_space(4.0);
                     ui.label(RichText::new("Zek Music").size(22.0).strong().color(Color32::WHITE));
                 });
-                ui.add_space(18.0);
+                ui.add_space(10.0);
+                // ── aviso de nova versão (some em "Depois") ──
+                if let Some((tag, url)) = self.update_info.clone() {
+                    if !self.upd_dismissed {
+                        egui::Frame::none()
+                            .fill(BTN)
+                            .stroke(stroke(1.0, acc.hi))
+                            .rounding(Rounding::same(12.0))
+                            .inner_margin(Margin::symmetric(10.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(
+                                    RichText::new(format!("Nova versão {tag} disponível"))
+                                        .size(13.0)
+                                        .color(Color32::WHITE),
+                                );
+                                ui.add_space(2.0);
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(RichText::new("Baixar").size(12.0))
+                                                .fill(acc.base)
+                                                .min_size(Vec2::new(78.0, 24.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        open_url(&url);
+                                    }
+                                    if ui
+                                        .add(
+                                            egui::Button::new(RichText::new("Depois").size(12.0))
+                                                .min_size(Vec2::new(58.0, 24.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.upd_dismissed = true;
+                                    }
+                                });
+                            });
+                        ui.add_space(8.0);
+                    }
+                }
                 ui.label(RichText::new("   SUAS PLAYLISTS").size(11.0).strong().color(MUTED));
                 ui.add_space(6.0);
-                let h = (ui.available_height() - 96.0).max(80.0);
+                let h = (ui.available_height() - 142.0).max(80.0);
                 egui::ScrollArea::vertical().max_height(h).auto_shrink([false, false]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     for (i, p) in self.cfg.playlists.iter().enumerate() {
@@ -1999,11 +2708,34 @@ impl ZekApp {
                             }
                             continue;
                         }
-                        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 54.0), Sense::click());
-                        let (count, custom) = match &p.source {
-                            PlaylistSource::Folder(x) => (self.tracks.get(x).map_or(0, |v| v.len()), false),
-                            PlaylistSource::Custom(v) => (v.len(), true),
+                        let (rect, resp) =
+                            ui.allocate_exact_size(Vec2::new(ui.available_width(), 54.0), Sense::click_and_drag());
+                        let (count, custom, estado) = match &p.source {
+                            PlaylistSource::Folder(x) => (self.tracks.get(x).map_or(0, |v| v.len()), false, self.estado_pasta(x)),
+                            PlaylistSource::Custom(v) => (v.len(), true, FolderStatus::Ok),
                         };
+                        let indisponivel = estado != FolderStatus::Ok;
+                        // ── arrastar para reordenar ──
+                        if resp.drag_started() && !p.session {
+                            self.drag_pl = Some(p.id);
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                        }
+                        let arrastando = self.drag_pl == Some(p.id);
+                        if arrastando {
+                            ui.painter().rect_filled(rect, 12.0, Color32::from_white_alpha(22));
+                        } else if let Some(origem) = self.drag_pl {
+                            if origem != p.id && !p.session {
+                                if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                                    if rect.contains(pos) {
+                                        let antes = pos.y < rect.center().y;
+                                        let y = if antes { rect.top() } else { rect.bottom() };
+                                        ui.painter().rect_filled(rect, 12.0, Color32::from_white_alpha(12));
+                                        ui.painter().hline(rect.x_range(), y, stroke(2.0, acc.hi));
+                                        self.drag_target = Some(if antes { i } else { i + 1 });
+                                    }
+                                }
+                            }
+                        }
                         let is_playing = self.snap.queue_pl == Some(p.id) && self.snap.active && !self.snap.paused;
                         {
                             let painter = ui.painter();
@@ -2020,11 +2752,22 @@ impl ZekApp {
                             let right = if selected { rect.right() - 58.0 } else { rect.right() - 34.0 };
                             let clip = Rect::from_min_max(rect.min, Pos2::new(right, rect.max.y));
                             let pc = painter.with_clip_rect(clip);
-                            pc.text(Pos2::new(rect.left() + 58.0, rect.center().y - 9.0), Align2::LEFT_CENTER, &p.name, FontId::proportional(14.5), if selected { Color32::WHITE } else { TEXT });
-                            let sub = format!("{} músicas{}", count, if custom { " • personalizada" } else { "" });
-                            pc.text(Pos2::new(rect.left() + 58.0, rect.center().y + 10.0), Align2::LEFT_CENTER, sub, FontId::proportional(11.5), MUTED);
+                            let sub = if indisponivel {
+                                "pasta indisponível".to_string()
+                            } else {
+                                format!("{} músicas{}", count, if custom { " • personalizada" } else { "" })
+                            };
+                            let cor_nome = if indisponivel { Color32::from_white_alpha(110) } else { TEXT };
+                            pc.text(
+                                Pos2::new(rect.left() + 58.0, rect.center().y - 9.0),
+                                Align2::LEFT_CENTER,
+                                &p.name,
+                                FontId::proportional(14.5),
+                                if selected { Color32::WHITE } else { cor_nome },
+                            );
+                            pc.text(Pos2::new(rect.left() + 58.0, rect.center().y + 10.0), Align2::LEFT_CENTER, sub, FontId::proportional(11.5), if indisponivel { WARN } else { MUTED });
                             if !selected && is_playing {
-                                equalizer(painter, Pos2::new(rect.right() - 18.0, rect.center().y), time, true);
+                                equalizer(painter, Pos2::new(rect.right() - 18.0, rect.center().y), time, true, self.accent.hi);
                             }
                         }
                         if selected {
@@ -2058,7 +2801,7 @@ impl ZekApp {
                             }
                             match &p.source {
                                 PlaylistSource::Custom(_) => {
-                                    if ui.button("Excluir playlist").clicked() {
+                                    if !p.session && ui.button("Excluir playlist").clicked() {
                                         acts.push(Act::Delete(p.id));
                                         ui.close_menu();
                                     }
@@ -2073,14 +2816,29 @@ impl ZekApp {
                         });
                     }
                 });
+                // soltou a playlist arrastada? aplica a nova posição
+                if let Some(origem) = self.drag_pl {
+                    if ui.input(|i| !i.pointer.any_down()) {
+                        self.drag_pl = None;
+                        if let Some(dest) = self.drag_target.take() {
+                            acts.push(Act::MovePlaylistTo(origem, dest));
+                        }
+                    }
+                }
                 ui.add_space(10.0);
                 let w = ui.available_width();
-                if ui.add_sized([w, 36.0], egui::Button::new(RichText::new("+  Nova playlist").color(Color32::WHITE).strong()).fill(ACCENT)).clicked() {
+                if ui.add_sized([w, 36.0], egui::Button::new(RichText::new("+  Nova playlist").color(Color32::WHITE).strong()).fill(acc.base)).clicked() {
                     acts.push(Act::NewPlaylist);
                 }
-                if ui.add_sized([w, 36.0], egui::Button::new("Pastas da biblioteca")).clicked() {
-                    self.show_folders = true;
-                }
+                ui.horizontal(|ui| {
+                    let bw = (ui.available_width() - 6.0) / 2.0;
+                    if ui.add_sized([bw, 36.0], egui::Button::new("Pastas")).on_hover_text("Pastas da biblioteca").clicked() {
+                        self.show_folders = true;
+                    }
+                    if ui.add_sized([bw, 36.0], egui::Button::new("Ajustes")).clicked() {
+                        self.show_settings = true;
+                    }
+                });
             });
     }
 
@@ -2089,14 +2847,15 @@ impl ZekApp {
         egui::CentralPanel::default().frame(Frame::none().fill(BG)).show(ctx, |ui| {
             let full = ui.max_rect();
             let gh = full.height().min(380.0);
-            gradient_rect_v(ui.painter(), Rect::from_min_size(full.min, Vec2::new(full.width(), gh)), Color32::from_rgb(24, 54, 128), BG);
+            let acc = self.accent;
+            gradient_rect_v(ui.painter(), Rect::from_min_size(full.min, Vec2::new(full.width(), gh)), scale_color(acc.base, 0.42), BG);
 
             let has_custom = self.cfg.playlists.iter().any(|p| matches!(p.source, PlaylistSource::Custom(_)));
             if self.cfg.roots.is_empty() && !has_custom {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.26);
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(84.0), Sense::hover());
-                    rounded_gradient(ui.painter(), r, 24.0, ACCENT, CYAN);
+                    rounded_gradient(ui.painter(), r, 24.0, acc.base, acc.hi);
                     let c = r.center();
                     ui.painter().add(egui::Shape::convex_polygon(
                         vec![Pos2::new(c.x - 10.0, c.y - 16.0), Pos2::new(c.x - 10.0, c.y + 16.0), Pos2::new(c.x + 18.0, c.y)],
@@ -2109,7 +2868,7 @@ impl ZekApp {
                     ui.label(RichText::new("Escolha a pasta que contém as suas pastas de músicas.\nCada subpasta vira uma playlist automaticamente.").size(16.0).color(MUTED));
                     ui.add_space(20.0);
                     let b = egui::Button::new(RichText::new("Escolher pasta de músicas").size(16.0).color(Color32::WHITE).strong())
-                        .fill(ACCENT)
+                        .fill(acc.base)
                         .min_size(Vec2::new(280.0, 46.0));
                     if ui.add(b).clicked() {
                         acts.push(Act::AddFolders);
@@ -2123,6 +2882,10 @@ impl ZekApp {
             };
             let Some(pl) = self.cfg.playlists.iter().find(|p| p.id == sel) else { return };
             let is_custom = matches!(pl.source, PlaylistSource::Custom(_));
+            let estado = match &pl.source {
+                PlaylistSource::Folder(p) => self.estado_pasta(p),
+                PlaylistSource::Custom(_) => FolderStatus::Ok,
+            };
             let name = pl.name.clone();
             let tracks: Vec<PathBuf> = match &pl.source {
                 PlaylistSource::Folder(p) => self.tracks.get(p).cloned().unwrap_or_default(),
@@ -2177,10 +2940,10 @@ impl ZekApp {
                             let same = self.snap.queue_pl == Some(sel) && self.snap.active;
                             let this_playing = same && !self.snap.paused;
                             let ic = if this_playing { Icon::Pause } else { Icon::Play };
-                            if icon_button(ui, ic, 54.0, true, false).clicked() {
+                            if icon_button(ui, ic, 54.0, true, false, self.accent).clicked() {
                                 acts.push(if same { Act::Toggle } else { Act::PlayAll });
                             }
-                            if icon_button(ui, Icon::Shuffle, 38.0, false, self.shuffle).on_hover_text("Aleatório").clicked() {
+                            if icon_button(ui, Icon::Shuffle, 38.0, false, self.shuffle, self.accent).on_hover_text("Aleatório").clicked() {
                                 self.shuffle = !self.shuffle;
                                 let _ = self.cmd_tx.send(Cmd::Shuffle(self.shuffle));
                             }
@@ -2199,6 +2962,9 @@ impl ZekApp {
                     ui.add_space(24.0);
                     let msg = if is_custom {
                         "Playlist vazia. Use \"Adicionar músicas\", arraste arquivos para cá\nou clique com o botão direito numa música de outra playlist."
+                    } else if estado == FolderStatus::Unmounted || estado == FolderStatus::Missing {
+                        "Pasta indisponível agora (o disco pode estar desmontado).\n\
+                         Suas playlists e a ordem continuam guardadas — quando a pasta voltar, tudo reaparece."
                     } else {
                         "Nenhuma música encontrada nesta pasta."
                     };
@@ -2261,7 +3027,7 @@ impl ZekApp {
                             let cy = rect.center().y;
                             let (tx, ax, dx) = columns(rect);
                             if playing {
-                                equalizer(painter, Pos2::new(rect.left() + 24.0, cy), time_now, playing_anim);
+                                equalizer(painter, Pos2::new(rect.left() + 24.0, cy), time_now, playing_anim, self.accent.hi);
                             } else if resp.hovered() {
                                 painter.add(egui::Shape::convex_polygon(
                                     vec![Pos2::new(rect.left() + 20.0, cy - 6.0), Pos2::new(rect.left() + 20.0, cy + 6.0), Pos2::new(rect.left() + 30.0, cy)],
@@ -2410,6 +3176,7 @@ impl ZekApp {
             return;
         }
         let mut open = true;
+        let acc = self.accent;
         egui::Window::new(RichText::new("Pastas da biblioteca").strong())
             .open(&mut open)
             .collapsible(false)
@@ -2432,7 +3199,7 @@ impl ZekApp {
                 }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new(RichText::new("Adicionar pasta").color(Color32::WHITE).strong()).fill(ACCENT)).clicked() {
+                    if ui.add(egui::Button::new(RichText::new("Adicionar pasta").color(Color32::WHITE).strong()).fill(acc.base)).clicked() {
                         acts.push(Act::AddFolders);
                     }
                     if ui.button("Atualizar biblioteca").clicked() {
@@ -2441,6 +3208,98 @@ impl ZekApp {
                 });
             });
         self.show_folders = open;
+    }
+
+    // ───────────────────────── UI: ajustes ─────────────────────────
+    fn ui_settings(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
+        if !self.show_settings {
+            return;
+        }
+        let mut open = true;
+        let acc = self.accent;
+        egui::Window::new(RichText::new("Ajustes").strong())
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(470.0)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("Zek Music v{}", env!("CARGO_PKG_VERSION")))
+                            .strong()
+                            .color(acc.hi),
+                    );
+                    if self.update_info.is_some() {
+                        ui.colored_label(WARN, " • versão nova disponível");
+                    }
+                });
+                ui.add_space(8.0);
+                ui.label(RichText::new("Cor de destaque").strong().color(TEXT));
+                ui.horizontal_wrapped(|ui| {
+                    for (i, (a, _)) in PALETTES.iter().enumerate() {
+                        let c = Color32::from_rgb(a[0], a[1], a[2]);
+                        let (r, resp) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+                        ui.painter().rect_filled(r, 8.0, c);
+                        let marcada = self.cfg.accent_custom.is_none() && self.cfg.accent_idx as usize == i;
+                        if marcada {
+                            ui.painter().rect_stroke(r, 8.0, stroke(2.5, Color32::WHITE));
+                        } else if resp.hovered() {
+                            ui.painter().rect_stroke(r, 8.0, stroke(2.0, lerp_color(c, Color32::WHITE, 0.5)));
+                        }
+                        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            acts.push(Act::SetAccent(i as u8));
+                        }
+                    }
+                });
+                egui::CollapsingHeader::new(RichText::new("Cor personalizada").color(MUTED))
+                    .default_open(self.cfg.accent_custom.is_some())
+                    .show_unindented(ui, |ui| {
+                        let (mut vr, mut vg, mut vb) = match self.cfg.accent_custom {
+                            Some(c) => (c[0] as i32, c[1] as i32, c[2] as i32),
+                            None => (self.accent.base.r() as i32, self.accent.base.g() as i32, self.accent.base.b() as i32),
+                        };
+                        let mut mudou = false;
+                        ui.horizontal(|ui| {
+                            for (nome, v) in [("R", &mut vr), ("G", &mut vg), ("B", &mut vb)] {
+                                ui.label(RichText::new(nome).color(MUTED));
+                                if ui.add(egui::DragValue::new(v).range(0..=255).speed(1.0)).changed() {
+                                    mudou = true;
+                                }
+                                ui.add_space(6.0);
+                            }
+                        });
+                        if mudou {
+                            acts.push(Act::SetAccentCustom(Some([vr as u8, vg as u8, vb as u8])));
+                        }
+                    });
+                ui.add_space(8.0);
+                let mut bandeira = self.cfg.check_updates;
+                if ui
+                    .checkbox(&mut bandeira, "Avisar quando sair versão nova (consulta o GitHub 1 vez ao dia)")
+                    .changed()
+                {
+                    acts.push(Act::SetCheckUpdates(bandeira));
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Verificar agora").clicked() {
+                        acts.push(Act::CheckUpdates);
+                    }
+                    if ui.button("Abrir pasta do registro").clicked() {
+                        acts.push(Act::OpenDataDir);
+                    }
+                });
+                ui.add_space(10.0);
+                ui.label(RichText::new("Registro de erro (últimas linhas)").color(MUTED));
+                let linhas = log_tail(8);
+                egui::ScrollArea::vertical().max_height(96.0).show(ui, |ui| {
+                    for l in linhas {
+                        ui.label(RichText::new(l).monospace().size(10.5).color(MUTED));
+                    }
+                });
+            });
+        self.show_settings = open;
     }
 }
 
@@ -2452,6 +3311,7 @@ impl eframe::App for ZekApp {
         self.ui_sidebar(ctx, &mut acts);
         self.ui_central(ctx, &mut acts);
         self.ui_folders(ctx, &mut acts);
+        self.ui_settings(ctx, &mut acts);
         self.ui_expanded(ctx);
         for a in acts {
             self.handle(a);
@@ -2464,15 +3324,15 @@ impl eframe::App for ZekApp {
 }
 
 // ───────────────────────── Estilo ─────────────────────────
-fn setup_style(ctx: &egui::Context) {
+fn setup_style(ctx: &egui::Context, accent: Accent) {
     let mut v = egui::Visuals::dark();
     v.panel_fill = BG;
     v.window_fill = PANEL;
     v.extreme_bg_color = Color32::from_rgb(7, 11, 22);
     v.faint_bg_color = PANEL;
-    v.selection.bg_fill = ACCENT;
+    v.selection.bg_fill = accent.base;
     v.selection.stroke = stroke(1.0, Color32::WHITE);
-    v.hyperlink_color = ACCENT_HI;
+    v.hyperlink_color = accent.hi;
     v.widgets.noninteractive.bg_fill = PANEL;
     v.widgets.noninteractive.fg_stroke = stroke(1.0, TEXT);
     v.widgets.noninteractive.bg_stroke = stroke(1.0, Color32::from_rgb(24, 34, 62));
@@ -2484,8 +3344,8 @@ fn setup_style(ctx: &egui::Context) {
     v.widgets.hovered.weak_bg_fill = BTN_HOVER;
     v.widgets.hovered.fg_stroke = stroke(1.0, Color32::WHITE);
     v.widgets.hovered.bg_stroke = Stroke::NONE;
-    v.widgets.active.bg_fill = ACCENT;
-    v.widgets.active.weak_bg_fill = ACCENT;
+    v.widgets.active.bg_fill = accent.base;
+    v.widgets.active.weak_bg_fill = accent.base;
     v.widgets.active.fg_stroke = stroke(1.0, Color32::WHITE);
     let r = Rounding::same(10.0);
     v.widgets.noninteractive.rounding = r;
@@ -2519,14 +3379,76 @@ fn build_viewport() -> egui::ViewportBuilder {
     vp
 }
 
+// ───────────────────────── Testes ─────────────────────────
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    #[test]
+    fn ordem_natural_dos_nomes() {
+        let mut v = vec![
+            PathBuf::from("10 - j.mp3"),
+            PathBuf::from("2 - b.mp3"),
+            PathBuf::from("1 - a.mp3"),
+            PathBuf::from("Album/11 - k.mp3"),
+        ];
+        order_tracks(&mut v, &HashMap::new());
+        assert_eq!(v, vec![
+            PathBuf::from("1 - a.mp3"),
+            PathBuf::from("2 - b.mp3"),
+            PathBuf::from("10 - j.mp3"),
+            PathBuf::from("Album/11 - k.mp3"),
+        ]);
+    }
+
+    #[test]
+    fn ordem_pelo_numero_da_faixa() {
+        // etiquetas com número único: segue a ordem do álbum, não a do nome
+        let mut v = vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3"), PathBuf::from("c.mp3")];
+        let mut metas = HashMap::new();
+        metas.insert(PathBuf::from("a.mp3"), Meta { track: Some(3), ..Default::default() });
+        metas.insert(PathBuf::from("b.mp3"), Meta { track: Some(1), ..Default::default() });
+        metas.insert(PathBuf::from("c.mp3"), Meta { track: Some(2), ..Default::default() });
+        order_tracks(&mut v, &metas);
+        assert_eq!(v, vec![PathBuf::from("b.mp3"), PathBuf::from("c.mp3"), PathBuf::from("a.mp3")]);
+    }
+
+    #[test]
+    fn numero_repetido_usaa_natural() {
+        // número repetido não dá para confiar: cai para a ordem natural
+        let mut v = vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")];
+        let mut metas = HashMap::new();
+        metas.insert(PathBuf::from("a.mp3"), Meta { track: Some(1), ..Default::default() });
+        metas.insert(PathBuf::from("b.mp3"), Meta { track: Some(1), ..Default::default() });
+        order_tracks(&mut v, &metas);
+        assert_eq!(v, vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")]);
+    }
+
+    #[test]
+    fn aviso_de_versao_nova() {
+        assert!(versao_mais_nova("v0.6.1", "0.6.0"));
+        assert!(versao_mais_nova("v1.0.0", "0.99.9"));
+        assert!(!versao_mais_nova("v0.6.0", "0.6.0"));
+        assert!(!versao_mais_nova("v0.5.9", "0.6.0"));
+    }
+
+    #[test]
+    fn selo_de_data() {
+        assert_eq!(fmt_stamp(0), "1970-01-01 00:00:00");
+        assert_eq!(fmt_stamp(1_767_225_600), "2026-01-01 00:00:00");
+    }
+}
+
 #[cfg(not(windows))]
 fn main() -> eframe::Result<()> {
+    log_init();
     let opts = eframe::NativeOptions { viewport: build_viewport(), ..Default::default() };
     eframe::run_native("Zek Music", opts, Box::new(|cc| Ok(Box::new(ZekApp::new(cc)))))
 }
 
 #[cfg(windows)]
 fn main() -> eframe::Result<()> {
+    log_init();
     // 1ª tentativa: DirectX (funciona até em máquinas virtuais, sem placa de vídeo)
     let opts = eframe::NativeOptions { viewport: build_viewport(), renderer: eframe::Renderer::Wgpu, ..Default::default() };
     if eframe::run_native("Zek Music", opts, Box::new(|cc| Ok(Box::new(ZekApp::new(cc))))).is_ok() {

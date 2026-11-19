@@ -4,3 +4,5 @@
 *.AppImage
 *.zip
 .DS_Store
+/build
+*.appimage

@@ -5,8 +5,10 @@ set -e
 cd "$(dirname "$0")"
 
 REPO="zek-music"
-VERSAO="v0.4.1"
-DESC="Player de músicas leve para Linux onde cada pasta vira uma playlist. Feito em Rust."
+# ⚠️ ATENÇÃO: esta é a versão que vira tag e dispara a compilação dos pacotes
+# (.deb, .rpm, AppImage, Windows). Troque aqui sempre que publicar uma nova.
+VERSAO="v0.6.0"
+DESC="Player de músicas leve para Linux e Windows onde cada pasta vira uma playlist. Feito em Rust."
 
 echo "=== Publicando o Zek Music no GitHub ==="
 
@@ -56,7 +58,7 @@ else
 fi
 
 # 7) Tópicos do repositório (ajudam as pessoas a encontrar o projeto)
-gh repo edit "$USUARIO/$REPO" --add-topic rust,music-player,linux,appimage,egui >/dev/null 2>&1 || true
+gh repo edit "$USUARIO/$REPO" --add-topic rust,music-player,linux,windows,appimage,deb,rpm,egui >/dev/null 2>&1 || true
 
 # 8) Tag de versão: é ela que dispara a compilação do AppImage
 if git rev-parse "$VERSAO" >/dev/null 2>&1; then
@@ -72,5 +74,7 @@ echo "Página do projeto:   https://github.com/$USUARIO/$REPO"
 echo "Acompanhar a build:  https://github.com/$USUARIO/$REPO/actions"
 echo "Download (depois):   https://github.com/$USUARIO/$REPO/releases/latest"
 echo
-echo "A compilação leva uns 10 a 15 minutos. Quando a bolinha ficar verde,"
-echo "o AppImage aparece em Releases."
+echo "A compilação leva uns 10 a 15 minutos. O robô gera:"
+echo "  • Linux:  .deb, .rpm, AppImage e versão portátil"
+echo "  • Windows: instalador (.exe) e versão portátil (.zip)"
+echo "Quando as bolinhas ficarem verdes, os arquivos aparecem em Releases."

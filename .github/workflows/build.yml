@@ -1,0 +1,114 @@
+name: Compilar pacotes
+
+# Roda sozinho quando você cria uma tag de versão (ex.: v0.4.0)
+# ou manualmente pelo botão "Run workflow" na aba Actions.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  # ───────────── Linux: .deb, .rpm, AppImage e portátil ─────────────
+  linux:
+    permissions:
+      contents: write   # para anexar os arquivos na release
+    strategy:
+      matrix:
+        include:
+          - alvo: deb
+          - alvo: rpm
+          - alvo: appimage
+          - alvo: portatil
+    # Ubuntu 22.04 = glibc mais antigo, então o AppImage roda em mais distros
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar dependências
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config curl libfuse2 xz-utils \
+            libasound2-dev libdbus-1-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
+            cpio rpm
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compilar (${{ matrix.alvo }})
+        run: |
+          case "${{ matrix.alvo }}" in
+            deb)      bash ./build-deb.sh ;;
+            rpm)      bash ./build-rpm.sh ;;
+            appimage) bash ./build-appimage.sh ;;
+            portatil) bash ./build-portatil.sh ;;
+          esac
+
+      - name: Juntar o que foi gerado
+        run: |
+          mkdir -p saida
+          cp build/dist/* saida/ 2>/dev/null || true
+          cp ZekMusic-x86_64.AppImage saida/ 2>/dev/null || true
+          ls -lh saida
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.alvo }}
+          path: saida/*
+
+      # anexa o que foi gerado na Release da tag
+      - name: Publicar na Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: saida/*
+          fail_on_unmatched_files: false
+
+  # ───────────── Windows: instalador + portátil ─────────────
+  windows:
+    permissions:
+      contents: write   # para anexar os arquivos na release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compilar
+        run: cargo build --release
+
+      - name: Ler a versão do Cargo.toml
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          "VERSAO=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Versão: $v"
+
+      - name: Gerar o instalador (Inno Setup)
+        run: |
+          choco install innosetup -y --no-progress
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$env:VERSAO" "packaging\windows\zek-music.iss"
+
+      - name: Gerar a versão portátil
+        run: |
+          New-Item -ItemType Directory -Path portable\ZekMusic -Force | Out-Null
+          Copy-Item target\release\zek-music.exe portable\ZekMusic\
+          Copy-Item LICENSE portable\ZekMusic\
+          "Programa portátil: as configurações ficam na pasta 'dados' ao lado dele." | Out-File portable\ZekMusic\LEIA-ME.txt
+          New-Item portable\ZekMusic\portable.txt -ItemType File | Out-Null
+          Compress-Archive -Path portable\ZekMusic\* -DestinationPath "ZekMusic-Windows-Portable-$env:VERSAO.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/ZekMusic-Setup.exe
+            ZekMusic-Windows-Portable-*.zip
+
+      - name: Publicar na Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            dist/ZekMusic-Setup.exe
+            ZekMusic-Windows-Portable-*.zip
+          fail_on_unmatched_files: false

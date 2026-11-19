@@ -5,9 +5,9 @@
 **Player de músicas leve e moderno para Linux e Windows, onde cada pasta vira uma playlist.**
 
 ![Rust](https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white)
-![Linux](https://img.shields.io/badge/Linux-AppImage-3b82f6?style=flat&logo=linux&logoColor=white)
+![Linux](https://img.shields.io/badge/Linux-AppImage%20%2B%20.deb%20%2B%20.rpm-3b82f6?style=flat&logo=linux&logoColor=white)
 ![Windows](https://img.shields.io/badge/Windows-Instalador%20%2B%20Port%C3%A1til-0078d4?style=flat&logo=windows&logoColor=white)
-![Status](https://img.shields.io/badge/vers%C3%A3o-0.5.0-38bdf8?style=flat)
+![Status](https://img.shields.io/badge/vers%C3%A3o-0.6.0-38bdf8?style=flat)
 
 <img src="screenshots/zek-music.png" alt="Zek Music" width="900">
 
@@ -33,11 +33,18 @@ musicas/                 ← a pasta que você escolhe
 ## 🚀 Funcionalidades
 
 - 📁 **Pastas viram playlists** — o nome da pasta é o nome da playlist (e você pode renomear depois)
+- 🛡️ **Disco desmontado não apaga suas playlists** — se a pasta não está montada ao abrir, o programa guarda tudo e avisa "pasta indisponível" (e volta sozinho quando você montar)
+- 🔢 **Ordem que faz sentido** — "2 - música" vem antes de "10 - música"; quando as faixas têm número na etiqueta, o programa segue a ordem do álbum
 - 🔄 **Biblioteca sempre atualizada** — a pasta é monitorada: adicionou ou removeu uma música, o player atualiza sozinho
-- ✏️ **Renomear e reordenar playlists** — duplo clique para renomear, setinhas para mudar a ordem
+- ✏️ **Renomear e reordenar playlists** — duplo clique para renomear e **arrastar** para colocar na posição que quiser
 - ➕ **Playlists personalizadas** — crie playlists fora do padrão, adicione músicas de qualquer pasta, arraste arquivos para a janela
+- ⏯️ **Continua de onde parou** — ao abrir, volta para a última playlist, música e posição (e lembra volume, aleatório e repetir)
 - ▶️ **Player integrado** — play/pause, anterior, próxima, linha do tempo com arraste, volume, aleatório e repetir (tudo / uma)
-- 🖼️ **Capa do álbum, artista e duração** lidos das tags dos arquivos
+- 🖼️ **Capa do álbum, artista e duração** lidos das tags dos arquivos (a capa é decodificada em segundo plano — trocar de música não engasga mais)
+- 🎨 **Cor de destaque escolhível** — 8 combinações prontas ou uma cor sua, em Ajustes
+- 🔔 **Aviso de nova versão** — o programa consulta o GitHub uma vez por dia e avisa quando sair release nova
+- 🩺 **Registro de erros** — se algo der errado, o motivo fica escrito num arquivo (`zek-music.log`), visível em Ajustes
+- 📂 **"Abrir com o Zek Music"** — duplo clique num .mp3/.flac/.ogg/.wav e ele toca no programa
 - 🔎 **Busca** dentro da playlist
 - 🖼️ **Tela "Tocando agora"** — clique na capa do player para expandir, com fundo em degradê na cor da capa
 - ⌨️ **Teclas de mídia no Linux (MPRIS)** — próxima, anterior e play/pause do teclado funcionam mesmo com o app em segundo plano ou dentro de um jogo
@@ -58,18 +65,32 @@ Baixe na aba [**Releases**](../../releases):
 | Arquivo | Para quem |
 |---|---|
 | [`ZekMusic-Setup.exe`](../../releases/latest/download/ZekMusic-Setup.exe) | **Instalador** (recomendado): atalho no Menu Iniciar e desinstalador |
-| [`ZekMusic-Windows-Portable.zip`](../../releases/latest/download/ZekMusic-Windows-Portable.zip) | **Portátil**: extraia e abra, sem instalar; guarda tudo na própria pasta |
+| [`ZekMusic-Windows-Portable-0.6.0.zip`](../../releases/latest/download/ZekMusic-Windows-Portable-0.6.0.zip) | **Portátil**: extraia e abra, sem instalar; guarda tudo na própria pasta |
 
 > ⚠️ **Aviso do Windows (SmartScreen):** como o programa ainda não tem assinatura digital paga, na primeira abertura o Windows pode mostrar *"O Windows protegeu o computador"*.
 > Clique em **Mais informações → Executar assim mesmo**. O código é aberto e você pode conferi-lo (ou compilar por conta própria).
 
-### 🐧 Linux — AppImage (recomendado)
+### 🐧 Linux — escolha o formato
 
-Baixe o [`ZekMusic-x86_64.AppImage`](../../releases/latest/download/ZekMusic-x86_64.AppImage) na aba [**Releases**](../../releases) e execute:
+Baixe na aba [**Releases**](../../releases/latest):
+
+| Arquivo | Para quem |
+|---|---|
+| [`zek-music_0.6.0_amd64.deb`](../../releases/latest/download/zek-music_0.6.0_amd64.deb) | **.deb** — Debian, Ubuntu, Mint, Pop!_OS |
+| [`zek-music-0.6.0-1.x86_64.rpm`](../../releases/latest/download/zek-music-0.6.0-1.x86_64.rpm) | **.rpm** — Fedora, openSUSE, RHEL |
+| [`ZekMusic-x86_64.AppImage`](../../releases/latest/download/ZekMusic-x86_64.AppImage) | **AppImage** — roda em qualquer distro, sem instalar |
+| [`ZekMusic-Portatil-0.6.0-linux-x86_64.tar.gz`](../../releases/latest/download/ZekMusic-Portatil-0.6.0-linux-x86_64.tar.gz) | **Portátil** — pendrive; guarda tudo na própria pasta |
 
 ```bash
-chmod +x ZekMusic-x86_64.AppImage
-./ZekMusic-x86_64.AppImage
+# AppImage
+chmod +x ZekMusic-x86_64.AppImage && ./ZekMusic-x86_64.AppImage
+
+# .deb / .rpm (instalam no sistema, com o "Abrir com" já configurado)
+sudo apt install ./zek-music_0.6.0_amd64.deb
+sudo dnf install ./zek-music-0.6.0-1.x86_64.rpm
+
+# portátil: extrair e rodar (tem um script para associar os arquivos de música)
+tar xzf ZekMusic-Portatil-0.6.0-linux-x86_64.tar.gz && cd zek-music && ./instalar-associacoes.sh
 ```
 
 > No Fedora, se o AppImage reclamar de FUSE: `sudo dnf install fuse-libs`
