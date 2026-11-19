@@ -46,7 +46,9 @@ jobs:
       - name: Juntar o que foi gerado
         run: |
           mkdir -p saida
+          # o .rpm fica num subdiretório (build/dist/x86_64)
           cp build/dist/* saida/ 2>/dev/null || true
+          cp build/dist/*/* saida/ 2>/dev/null || true
           cp ZekMusic-x86_64.AppImage saida/ 2>/dev/null || true
           ls -lh saida
 

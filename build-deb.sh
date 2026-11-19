@@ -47,13 +47,18 @@ exit 0
 EOF
 chmod 0755 "$R/DEBIAN/postinst"
 
+# as peças do .deb ficam numa pasta à parte, para não sujarem a de saída
+P=build/pecas-deb
+rm -rf "$P"
+mkdir -p "$P"
+tar -C "$R" --owner=0 --group=0 -czf "$P/data.tar.gz" ./usr
+tar -C "$R/DEBIAN" --owner=0 --group=0 -czf "$P/control.tar.gz" ./control ./postinst
+printf '2.0\n' > "$P/debian-binary"
 D=build/dist
 mkdir -p "$D"
-tar -C "$R" --owner=0 --group=0 -czf "$D/data.tar.gz" ./usr
-tar -C "$R/DEBIAN" --owner=0 --group=0 -czf "$D/control.tar.gz" ./control ./postinst
-printf '2.0\n' > "$D/debian-binary"
-rm -f "$D/zek-music_${VER}_amd64.deb"
-(cd "$D" && ar r "zek-music_${VER}_amd64.deb" debian-binary control.tar.gz data.tar.gz)
+DABS="$(pwd)/build/dist"
+rm -f "$DABS/zek-music_${VER}_amd64.deb"
+(cd "$P" && ar r "$DABS/zek-music_${VER}_amd64.deb" debian-binary control.tar.gz data.tar.gz)
 
 echo "Pronto: $D/zek-music_${VER}_amd64.deb"
 echo "Instalar com:  sudo apt install ./$D/zek-music_${VER}_amd64.deb"

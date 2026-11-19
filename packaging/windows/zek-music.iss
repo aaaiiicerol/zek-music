@@ -39,8 +39,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-; "Abrir com o Zek Music": clicar duas vezes num .mp3 abre no programa
-Name: "associar"; Description: "Associar arquivos de música (.mp3, .flac, .ogg, .wav, .m4a, .aac) ao Zek Music"; GroupDescription: "Ao instalar:"; Flags: checked
+Name: "associar"; Description: "Associar arquivos de musica (.mp3, .flac, .ogg, .wav, .m4a, .aac) ao Zek Music"; GroupDescription: "Ao instalar"; Flags: checkedonce
 
 [Files]
 Source: "..\..\target\release\{#MyAppExe}"; DestDir: "{app}"; Flags: ignoreversion
@@ -52,29 +51,29 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; Tasks: deskto
 
 [Registry]
 ; ── associação dos tipos de arquivo (aplicativo + "abrir com") ──
-Root: HKA; Subkey: "Software\Classes\.mp3\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppProgID}"; ValueData: ""; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\.flac\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppProgID}"; ValueData: ""; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\.ogg\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppProgID}"; ValueData: ""; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\.oga\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppProgID}"; ValueData: ""; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\.wav\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppProgID}"; ValueData: ""; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\.m4a\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppProgID}"; ValueData: ""; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\.aac\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppProgID}"; ValueData: ""; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\.mp3\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppProgID}"; ValueData: ""; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\.flac\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppProgID}"; ValueData: ""; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\.ogg\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppProgID}"; ValueData: ""; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\.oga\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppProgID}"; ValueData: ""; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\.wav\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppProgID}"; ValueData: ""; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\.m4a\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppProgID}"; ValueData: ""; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\.aac\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppProgID}"; ValueData: ""; Tasks: associar
 
-Root: HKA; Subkey: "Software\Classes\{#MyAppProgID}"; ValueType: string; ValueData: "Arquivo de música"; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\{#MyAppProgID}"; ValueName: "AppUserModelID"; ValueType: string; ValueData: "{#MyAppProgID}"; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\{#MyAppProgID}\DefaultIcon"; ValueType: string; ValueData: "{app}\{#MyAppExe},0"; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\{#MyAppProgID}\shell\open"; ValueType: string; ValueData: "Tocar no Zek Music"; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\{#MyAppProgID}\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExe}"" ""%1"""; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\{#MyAppProgID}"; ValueType: string; ValueData: "Arquivo de música"; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\{#MyAppProgID}"; ValueName: "AppUserModelID"; ValueType: string; ValueData: "{#MyAppProgID}"; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\{#MyAppProgID}\DefaultIcon"; ValueType: string; ValueData: "{app}\{#MyAppExe},0"; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\{#MyAppProgID}\shell\open"; ValueType: string; ValueData: "Tocar no Zek Music"; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\{#MyAppProgID}\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExe}"" ""%1"""; Tasks: associar
 
 ; "Abrir com" lista o programa
-Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}"; ValueType: string; ValueData: "{#MyAppName}"; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".mp3"; ValueData: ""; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".flac"; ValueData: ""; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".ogg"; ValueData: ""; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".wav"; ValueData: ""; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".m4a"; ValueData: ""; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".aac"; ValueData: ""; Tasks: associar
-Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExe}\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExe}"" ""%1"""; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExe}"; ValueType: string; ValueData: "{#MyAppName}"; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".mp3"; ValueData: ""; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".flac"; ValueData: ""; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".ogg"; ValueData: ""; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".wav"; ValueData: ""; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".m4a"; ValueData: ""; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExe}\SupportedTypes"; ValueType: string; ValueName: ".aac"; ValueData: ""; Tasks: associar
+Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExe}\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExe}"" ""%1"""; Tasks: associar
 
 ; notifica o Windows que as associações mudaram
 [Run]
