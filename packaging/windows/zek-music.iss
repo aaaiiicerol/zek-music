@@ -77,5 +77,5 @@ Root: HKCU; Subkey: "Software\Classes\Applications\{#MyAppExe}\shell\open\comman
 
 ; notifica o Windows que as associações mudaram
 [Run]
-Filename: "ie4uinit.exe"; Parameters: "-ClearIconCache"; Tasks: associar; Flags: runhidden; RunOnceId: "IconCache"
+Filename: "ie4uinit.exe"; Parameters: "-ClearIconCache"; Tasks: associar; Flags: runhidden
 Filename: "{app}\{#MyAppExe}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
