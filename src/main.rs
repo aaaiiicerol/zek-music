@@ -141,7 +141,9 @@ struct Meta {
 }
 
 /// Build da Microsoft Store: compile com a variavel de ambiente STORE_BUILD=true.
-pub const STORE_BUILD: bool = matches!(option_env!("STORE_BUILD"), Some("true"));
+fn is_store_build() -> bool {
+    std::env::var("STORE_BUILD").ok().as_deref() == Some("true")
+}
 
 fn config_path() -> PathBuf {
     // Modo portátil: se existir "portable.txt" ao lado do programa, tudo fica na pasta "dados".
@@ -1828,7 +1830,7 @@ impl ZekApp {
             app.start_scan();
         }
         // uma consulta ao GitHub por dia, sem segurar a abertura do programa
-        if app.cfg.check_updates && !STORE_BUILD && app.due_update_check() {
+        if app.cfg.check_updates && !is_store_build() && app.due_update_check() {
             app.spawn_update_check();
         }
         app
@@ -3277,7 +3279,7 @@ impl ZekApp {
                         }
                     });
                 ui.add_space(8.0);
-                if !STORE_BUILD {
+                if !is_store_build() {
                     let mut bandeira = self.cfg.check_updates;
                     if ui
                         .checkbox(&mut bandeira, "Avisar quando sair versão nova (consulta o GitHub 1 vez ao dia)")
