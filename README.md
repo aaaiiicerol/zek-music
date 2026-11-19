@@ -9,7 +9,9 @@
 ![Windows](https://img.shields.io/badge/Windows-Instalador%20%2B%20Port%C3%A1til-0078d4?style=flat&logo=windows&logoColor=white)
 ![Status](https://img.shields.io/badge/vers%C3%A3o-0.6.0-38bdf8?style=flat)
 
-<img src="screenshots/zek-music.png" alt="Zek Music" width="900">
+<img src="screenshots/print1.png" alt="Zek Music" width="900">
+
+<img src="screenshots/print2.png" alt="Zek Music" width="900">
 
 </div>
 
