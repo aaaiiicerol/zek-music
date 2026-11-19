@@ -1,0 +1,42 @@
+name: Pacote MSIX (Microsoft Store)
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  msix:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msix-store
+
+      - name: Compilar (build da Store, sem verificador de atualizacao)
+        env:
+          STORE_BUILD: "true"
+        run: cargo build --release
+
+      - name: Montar a pasta do pacote
+        run: |
+          New-Item -ItemType Directory -Path msix_out\Assets -Force | Out-Null
+          Copy-Item target\release\zek-music.exe msix_out\
+          Copy-Item packaging\msix\AppxManifest.xml msix_out\
+          Copy-Item packaging\msix\Assets\*.png msix_out\Assets\
+
+      - name: Empacotar com makeappx (sem assinar)
+        run: |
+          $mk = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter makeappx.exe |
+                Where-Object { $_.FullName -like "*\x64\*" } | Sort-Object FullName | Select-Object -Last 1
+          Write-Host "makeappx: $($mk.FullName)"
+          & $mk.FullName pack /d msix_out /p ZekMusic.msix /o
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ZekMusic-MSIX
+          path: ZekMusic.msix

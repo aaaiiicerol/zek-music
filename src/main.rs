@@ -140,6 +140,9 @@ struct Meta {
     track: Option<u32>,
 }
 
+/// Build da Microsoft Store: compile com a variavel de ambiente STORE_BUILD=true.
+pub const STORE_BUILD: bool = matches!(option_env!("STORE_BUILD"), Some("true"));
+
 fn config_path() -> PathBuf {
     // Modo portátil: se existir "portable.txt" ao lado do programa, tudo fica na pasta "dados".
     if let Ok(exe) = std::env::current_exe() {
@@ -1825,7 +1828,7 @@ impl ZekApp {
             app.start_scan();
         }
         // uma consulta ao GitHub por dia, sem segurar a abertura do programa
-        if app.cfg.check_updates && app.due_update_check() {
+        if app.cfg.check_updates && !STORE_BUILD && app.due_update_check() {
             app.spawn_update_check();
         }
         app
@@ -3274,22 +3277,24 @@ impl ZekApp {
                         }
                     });
                 ui.add_space(8.0);
-                let mut bandeira = self.cfg.check_updates;
-                if ui
-                    .checkbox(&mut bandeira, "Avisar quando sair versão nova (consulta o GitHub 1 vez ao dia)")
-                    .changed()
-                {
-                    acts.push(Act::SetCheckUpdates(bandeira));
+                if !STORE_BUILD {
+                    let mut bandeira = self.cfg.check_updates;
+                    if ui
+                        .checkbox(&mut bandeira, "Avisar quando sair versão nova (consulta o GitHub 1 vez ao dia)")
+                        .changed()
+                    {
+                        acts.push(Act::SetCheckUpdates(bandeira));
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Verificar agora").clicked() {
+                            acts.push(Act::CheckUpdates);
+                        }
+                        if ui.button("Abrir pasta do registro").clicked() {
+                            acts.push(Act::OpenDataDir);
+                        }
+                    });
                 }
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Verificar agora").clicked() {
-                        acts.push(Act::CheckUpdates);
-                    }
-                    if ui.button("Abrir pasta do registro").clicked() {
-                        acts.push(Act::OpenDataDir);
-                    }
-                });
                 ui.add_space(10.0);
                 ui.label(RichText::new("Registro de erro (últimas linhas)").color(MUTED));
                 let linhas = log_tail(8);
