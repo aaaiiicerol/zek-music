@@ -34,7 +34,7 @@
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
       </uap:VisualElements>
     <Extensions>
-      <uap:Extension Category="windows.fileAssociation">
+      <uap:Extension Category="windows.fileTypeAssociation">
         <uap:FileAssociation Name="zekmusic">
           <uap:SupportedFileExtensions>
             <uap:FileExtension>.mp3</uap:FileExtension>
