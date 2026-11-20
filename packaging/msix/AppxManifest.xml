@@ -6,7 +6,7 @@
 
   <Identity Name="aaaiiicerol.ZekMusic"
             Publisher="CN=61748738-F3F4-4127-AA2C-A309E316E017"
-            Version="0.6.0.0"
+            Version="0.6.1.0"
             ProcessorArchitecture="x64" />
 
   <Properties>
@@ -39,4 +39,21 @@
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
   </Capabilities>
+
+  <Extensions>
+    <uap:Extension Category="windows.fileAssociation">
+      <uap:FileAssociation Name="zekmusic">
+        <uap:SupportedFileExtensions>
+          <uap:FileExtension>.mp3</uap:FileExtension>
+          <uap:FileExtension>.flac</uap:FileExtension>
+          <uap:FileExtension>.ogg</uap:FileExtension>
+          <uap:FileExtension>.oga</uap:FileExtension>
+          <uap:FileExtension>.wav</uap:FileExtension>
+          <uap:FileExtension>.m4a</uap:FileExtension>
+          <uap:FileExtension>.aac</uap:FileExtension>
+        </uap:SupportedFileExtensions>
+      </uap:FileAssociation>
+    </uap:Extension>
+  </Extensions>
+
 </Package>
