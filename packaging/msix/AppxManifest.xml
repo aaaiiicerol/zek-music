@@ -35,7 +35,7 @@
       </uap:VisualElements>
     <Extensions>
       <uap:Extension Category="windows.fileTypeAssociation">
-        <uap:FileAssociation Name="zekmusic">
+        <uap:FileTypeAssociation Name="zekmusic">
           <uap:SupportedFileExtensions>
             <uap:FileExtension>.mp3</uap:FileExtension>
             <uap:FileExtension>.flac</uap:FileExtension>
@@ -45,7 +45,7 @@
             <uap:FileExtension>.m4a</uap:FileExtension>
             <uap:FileExtension>.aac</uap:FileExtension>
           </uap:SupportedFileExtensions>
-        </uap:FileAssociation>
+        </uap:FileTypeAssociation>
       </uap:Extension>
     </Extensions>
   </Application>
