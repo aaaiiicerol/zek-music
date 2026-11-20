@@ -1,0 +1,86 @@
+================================================================================
+RELATORIO DE ALTERACOES REALIZADAS - ZEK MUSIC v0.6.0
+================================================================================
+Responsavel: assistente de codigo (pi coding agent)
+Data: 19/11/2026
+Repositorio: https://github.com/aaaiiicerol/zek-music
+Versao afetada: 0.6.0
+
+--------------------------------------------------------------------------------
+OBJETIVO DAS ALTERACOES
+--------------------------------------------------------------------------------
+Adicionar suporte completo para compilacao local no Windows, corrigir erro
+de empacotamento (instalador .exe) e atualizar a documentacao visual do
+projeto com novas capturas de tela (prints).
+
+--------------------------------------------------------------------------------
+LISTA DE ARQUIVOS CRIADOS
+--------------------------------------------------------------------------------
+1. WINDOWS.md
+   - Guia passo a passo em portugues para compilar o Zek Music no Windows.
+   - Contem instrucoes de instalacao do Rust, Inno Setup 6 e 7-Zip.
+   - Explica como rodar o script compilar_windows.bat.
+   - Explica como fazer git push e criar tag para disparar o GitHub Actions.
+
+2. compilar_windows.bat
+   - Script para Windows (batch) que automatiza a compilacao local.
+   - Etapas executadas:
+     a) Verifica se Rust e Cargo estao instalados.
+     b) Compila o projeto com 'cargo build --release'.
+     c) Detecta a versao no Cargo.toml.
+     d) Verifica se o Inno Setup 6 esta instalado.
+     e) Gera o instalador 'dist/ZekMusic-Setup.exe' via ISCC.exe.
+     f) Gera a versao portatil 'ZekMusic-Windows-Portable-<versao>.zip'.
+
+--------------------------------------------------------------------------------
+LISTA DE ARQUIVOS MODIFICADOS
+--------------------------------------------------------------------------------
+3. .gitignore
+   - Adicionadas as entradas:
+       /dist
+       /portable
+   - Motivo: ignorar arquivos gerados pela compilacao Windows (instalador e
+     versao portatil) no controle de versao do Git.
+
+4. packaging/windows/zek-music.iss
+   - Removido o parametro invalido 'RunOnceId: "IconCache"' da secao [Run].
+   - Motivo: o Inno Setup 6 nao aceita 'RunOnceId' na secao [Run]; ele so e
+     valido em [UninstallRun]. Esse erro impediava a geracao do instalador
+     .exe tanto localmente quanto no GitHub Actions (workflow windows).
+
+5. README.md
+   - Substituída a imagem antiga 'screenshots/zek-music.png' por duas novas:
+       screenshots/print1.png
+       screenshots/print2.png
+   - Motivo: atualizar a documentacao visual com capturas de tela atuais do
+     projeto.
+
+--------------------------------------------------------------------------------
+ARQUIVOS NAO ALTERADOS (por solicitacao do usuario)
+--------------------------------------------------------------------------------
+- zekflix-repo (projeto ZekFlix) nao foi modificado.
+- O workflow .github/workflows/build.yml nao foi alterado (ja existia e
+  compila automaticamente para Windows e Linux ao criar uma tag v*).
+- Nenhum codigo fonte Rust (src/main.rs, Cargo.toml, Cargo.lock) foi
+  modificado.
+
+--------------------------------------------------------------------------------
+COMO VERIFICAR AS ALTERACOES NO GITHUB
+--------------------------------------------------------------------------------
+- Commits no repositorio zek-music:
+  * 4f59312 - adiciona guia e script de compilacao Windows local
+  * 028ff10 - corrige RunOnceId invalido no Inno Setup 6
+  * b6349d5 - atualiza README com novos prints e remove imagem antiga
+- Tag criada: v0.6.0 (aponta para o commit com a correcao do Inno Setup).
+- URL dos commits: https://github.com/aaaiiicerol/zek-music/commits/main
+
+--------------------------------------------------------------------------------
+RESULTADO ESPERADO
+--------------------------------------------------------------------------------
+- Compilacao local no Windows funciona sem erros (apresentou 'SUCESSO!' no
+  teste de compilacao do Rust).
+- Instalador .exe e versao portatil .zip gerados corretamente.
+- GitHub Actions compila automaticamente ao fazer push da tag v0.6.0.
+- README exibe as novas capturas de tela do projeto.
+
+================================================================================
