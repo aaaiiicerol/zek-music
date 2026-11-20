@@ -33,27 +33,26 @@
                           Square44x44Logo="Assets\Square44x44Logo.png">
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
       </uap:VisualElements>
-    </Application>
+    <Extensions>
+      <uap:Extension Category="windows.fileAssociation">
+        <uap:FileAssociation Name="zekmusic">
+          <uap:SupportedFileExtensions>
+            <uap:FileExtension>.mp3</uap:FileExtension>
+            <uap:FileExtension>.flac</uap:FileExtension>
+            <uap:FileExtension>.ogg</uap:FileExtension>
+            <uap:FileExtension>.oga</uap:FileExtension>
+            <uap:FileExtension>.wav</uap:FileExtension>
+            <uap:FileExtension>.m4a</uap:FileExtension>
+            <uap:FileExtension>.aac</uap:FileExtension>
+          </uap:SupportedFileExtensions>
+        </uap:FileAssociation>
+      </uap:Extension>
+    </Extensions>
+  </Application>
   </Applications>
 
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
   </Capabilities>
-
-  <Extensions>
-    <uap:Extension Category="windows.fileAssociation">
-      <uap:FileAssociation Name="zekmusic">
-        <uap:SupportedFileExtensions>
-          <uap:FileExtension>.mp3</uap:FileExtension>
-          <uap:FileExtension>.flac</uap:FileExtension>
-          <uap:FileExtension>.ogg</uap:FileExtension>
-          <uap:FileExtension>.oga</uap:FileExtension>
-          <uap:FileExtension>.wav</uap:FileExtension>
-          <uap:FileExtension>.m4a</uap:FileExtension>
-          <uap:FileExtension>.aac</uap:FileExtension>
-        </uap:SupportedFileExtensions>
-      </uap:FileAssociation>
-    </uap:Extension>
-  </Extensions>
 
 </Package>
